@@ -13,7 +13,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..database.connection import get_db
+from ..database.db import get_db
 from ..database.schemas import (
     RiskScoreResponse,
     RiskScoreListResponse,
@@ -49,7 +49,7 @@ router = APIRouter()
 async def assess_risk(
     body: RiskAssessmentRequest,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_roles("counselor", "admin")),
+    current_user: User = Depends(require_roles(["counselor", "admin"])),
 ):
     """Run the multi-factor risk-scoring pipeline for one student."""
     assessment = await assess_student_risk(
@@ -76,7 +76,7 @@ async def assess_risk(
 async def get_risk_score(
     student_id: str,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_roles("counselor", "admin")),
+    current_user: User = Depends(require_roles(["counselor", "admin"])),
 ):
     """Return the most recent risk score for the given student."""
     score = await get_latest_risk_score(db, student_id)
@@ -99,7 +99,7 @@ async def get_risk_score_history(
     student_id: str,
     limit: int = Query(default=20, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_roles("counselor", "admin")),
+    current_user: User = Depends(require_roles(["counselor", "admin"])),
 ):
     """Return past risk scores for a student, newest first."""
     scores = await get_risk_history(db, student_id, limit=limit)
@@ -120,7 +120,7 @@ async def get_risk_score_history(
 async def batch_risk_assessment(
     body: BatchRiskAssessmentRequest,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_roles("counselor", "admin")),
+    current_user: User = Depends(require_roles(["counselor", "admin"])),
 ):
     """Run risk assessments for a list of student IDs."""
     assessments = await batch_assess_students(
@@ -152,7 +152,7 @@ async def batch_risk_assessment(
     summary="Get risk threshold configuration",
 )
 async def get_risk_thresholds(
-    current_user: User = Depends(require_roles("counselor", "admin")),
+    current_user: User = Depends(require_roles(["counselor", "admin"])),
 ):
     """Return the current risk-level thresholds and factor weights."""
     return RiskThresholdsResponse(
@@ -174,7 +174,7 @@ async def get_trajectory(
     student_id: str,
     days: int = Query(default=30, ge=7, le=180),
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_roles("counselor", "admin")),
+    current_user: User = Depends(require_roles(["counselor", "admin"])),
 ):
     """Return mood-trend and risk-score trajectory over the window."""
     trend = await analyze_trend(db, student_id, days=days)
@@ -204,7 +204,7 @@ async def get_trajectory(
 async def get_recommendations(
     student_id: str,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_roles("counselor", "admin")),
+    current_user: User = Depends(require_roles(["counselor", "admin"])),
 ):
     """Generate rule-based intervention recommendations."""
     score_row = await get_latest_risk_score(db, student_id)

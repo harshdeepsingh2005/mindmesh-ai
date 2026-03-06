@@ -65,7 +65,7 @@ async def list_all_alerts(
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_roles("admin", "teacher")),
+    current_user: User = Depends(require_roles(["admin", "teacher"])),
 ) -> AlertListResponse:
     """List all alerts with optional filtering and pagination.
 
@@ -96,7 +96,7 @@ async def list_all_alerts(
 )
 async def open_alert_count(
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_roles("admin", "teacher")),
+    current_user: User = Depends(require_roles(["admin", "teacher"])),
 ) -> AlertCountResponse:
     """Return the total number of open alerts.
 
@@ -116,7 +116,7 @@ async def open_alert_count(
 async def bulk_acknowledge_alerts(
     body: AlertBulkAcknowledge,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_roles("admin", "teacher")),
+    current_user: User = Depends(require_roles(["admin", "teacher"])),
 ):
     """Acknowledge multiple open alerts in a single request.
 
@@ -147,7 +147,7 @@ async def bulk_acknowledge_alerts(
 async def create_alert(
     body: AlertCreate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_roles("admin", "teacher")),
+    current_user: User = Depends(require_roles(["admin", "teacher"])),
 ) -> AlertResponse:
     """Manually create an alert for a student.
 
@@ -195,7 +195,7 @@ async def get_student_alerts(
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_roles("admin", "teacher", "student")),
+    current_user: User = Depends(require_roles(["admin", "teacher", "student"])),
 ) -> AlertListResponse:
     """Get all alerts for a specific student.
 
@@ -236,7 +236,7 @@ async def get_student_alerts(
 async def get_alert(
     alert_id: str,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_roles("admin", "teacher")),
+    current_user: User = Depends(require_roles(["admin", "teacher"])),
 ) -> AlertResponse:
     """Retrieve a single alert by its ID."""
     alert = await get_alert_by_id(db, alert_id)
@@ -260,7 +260,7 @@ async def change_alert_status(
     alert_id: str,
     body: AlertStatusUpdate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_roles("admin", "teacher")),
+    current_user: User = Depends(require_roles(["admin", "teacher"])),
 ) -> AlertResponse:
     """Transition an alert to a new status.
 
@@ -298,7 +298,7 @@ async def change_alert_status(
 async def send_alert_notifications(
     alert_id: str,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_roles("admin")),
+    current_user: User = Depends(require_roles(["admin"])),
 ) -> AlertNotificationResponse:
     """Dispatch notifications to teachers for a specific alert.
 
