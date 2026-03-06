@@ -4,16 +4,14 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
 from .config import settings
 from .database.db import AsyncSessionLocal, init_db, close_db
 from .database.schemas import HealthCheckResponse
 from .logging_config import logger
-from .routes import student, counselor, analytics
-from .routes import auth, users
-from .routes import analysis
-from .routes import alerts
+from .routes import student, counselor, analytics, auth, users, analysis, alerts
 
 
 @asynccontextmanager
@@ -34,6 +32,15 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# CORS Middleware — allow frontend origins
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.CORS_ORIGINS if hasattr(settings, "CORS_ORIGINS") else ["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # Include routers
 app.include_router(auth.router, prefix="/auth", tags=["Authentication"])
 app.include_router(users.router, prefix="/users", tags=["User Management"])
@@ -41,7 +48,7 @@ app.include_router(student.router, prefix="/student", tags=["Student"])
 app.include_router(analysis.router, prefix="/emotion", tags=["AI Analysis"])
 app.include_router(counselor.router, prefix="/counselor", tags=["Counselor"])
 app.include_router(alerts.router, prefix="/alerts", tags=["Alerts"])
-app.include_router(analytics.router, prefix="/analytics", tags=["Analytics"])
+app.include_router(analytics.router, prefix="/analytics", tags=["Analytics & Dashboard"])
 
 
 @app.get("/health", response_model=HealthCheckResponse, tags=["System"])
