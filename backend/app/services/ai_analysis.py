@@ -2,6 +2,7 @@
 
 Coordinates emotion detection, sentiment analysis, and trend analysis.
 Stores all model predictions in the database via EmotionAnalysis records.
+After each analysis, triggers a risk re-assessment for the student.
 
 This is the central service that routes invoke to analyze behavioral data.
 """
@@ -84,6 +85,20 @@ async def analyze_record(
         f"(score={sentiment_result.sentiment_score}), "
         f"high_risk={sentiment_result.high_risk_flag}"
     )
+
+    # ── Trigger risk re-assessment after new analysis ────────────
+    try:
+        from .risk_scoring import assess_student_risk
+
+        await assess_student_risk(db, record.student_id)
+        logger.info(
+            f"Risk re-assessment triggered for student={record.student_id}"
+        )
+    except Exception as exc:
+        # Non-fatal — log but don't block the analysis response
+        logger.warning(
+            f"Risk re-assessment failed for student={record.student_id}: {exc}"
+        )
 
     return analysis
 

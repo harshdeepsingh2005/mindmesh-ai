@@ -238,6 +238,46 @@ class RiskScoreResponse(BaseModel):
         from_attributes = True
 
 
+class RiskScoreListResponse(BaseModel):
+    """Schema for a list of risk scores."""
+    student_id: str
+    scores: List[RiskScoreResponse]
+    total: int
+
+
+class RiskAssessmentRequest(BaseModel):
+    """Schema for requesting a risk assessment."""
+    student_id: str
+    lookback_days: Optional[int] = Field(default=30, ge=7, le=180)
+
+
+class RiskAssessmentResponse(BaseModel):
+    """Schema for risk assessment result."""
+    student_id: str
+    composite_score: int = Field(..., ge=0, le=100)
+    risk_level: str
+    contributing_factors: Dict[str, float]
+    assessed_at: datetime
+
+
+class BatchRiskAssessmentRequest(BaseModel):
+    """Schema for batch risk assessment."""
+    student_ids: List[str] = Field(..., min_length=1, max_length=50)
+    lookback_days: Optional[int] = Field(default=30, ge=7, le=180)
+
+
+class BatchRiskAssessmentResponse(BaseModel):
+    """Schema for batch risk assessment results."""
+    assessments: List[RiskAssessmentResponse]
+    total: int
+
+
+class RiskThresholdsResponse(BaseModel):
+    """Schema for risk threshold configuration."""
+    thresholds: Dict[str, Dict[str, int]]
+    factor_weights: Dict[str, float]
+
+
 # ─── Alert Schemas ──────────────────────────────────────────
 
 
