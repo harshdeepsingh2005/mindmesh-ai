@@ -12,7 +12,16 @@ from typing import Dict, List, Optional
 
 from ..logging_config import logger
 
-MODEL_VERSION = "sentiment-v0.2.0-lexicon"
+_FALLBACK_VERSION = "sentiment-v0.2.0-lexicon"
+
+
+def _get_model_version() -> str:
+    """Get the active sentiment analysis model version from the registry."""
+    try:
+        from .model_registry import registry
+        return registry.get_active_version_string("sentiment_analysis")
+    except Exception:
+        return _FALLBACK_VERSION
 
 # Positive and negative word lexicons with weights
 POSITIVE_WORDS: Dict[str, float] = {
@@ -76,7 +85,7 @@ class SentimentResult:
     negative_score: float
     high_risk_flag: bool
     high_risk_keywords_found: List[str]
-    model_version: str = MODEL_VERSION
+    model_version: str = ""
 
 
 def _tokenize(text: str) -> List[str]:
@@ -111,6 +120,8 @@ def analyze_sentiment(text: Optional[str]) -> SentimentResult:
     Returns:
         SentimentResult with polarity, scores, and risk flags.
     """
+    version = _get_model_version()
+
     if not text or not text.strip():
         return SentimentResult(
             sentiment_label="neutral",
@@ -119,6 +130,7 @@ def analyze_sentiment(text: Optional[str]) -> SentimentResult:
             negative_score=0.0,
             high_risk_flag=False,
             high_risk_keywords_found=[],
+            model_version=version,
         )
 
     # Check for high-risk content first
@@ -138,6 +150,7 @@ def analyze_sentiment(text: Optional[str]) -> SentimentResult:
             negative_score=0.0,
             high_risk_flag=bool(high_risk_found),
             high_risk_keywords_found=high_risk_found,
+            model_version=version,
         )
 
     pos_score = 0.0
@@ -201,6 +214,7 @@ def analyze_sentiment(text: Optional[str]) -> SentimentResult:
         negative_score=round(neg_normalized, 4),
         high_risk_flag=bool(high_risk_found),
         high_risk_keywords_found=high_risk_found,
+        model_version=version,
     )
 
     logger.debug(

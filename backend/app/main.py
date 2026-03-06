@@ -11,7 +11,7 @@ from .config import settings
 from .database.db import AsyncSessionLocal, init_db, close_db
 from .database.schemas import HealthCheckResponse
 from .logging_config import logger
-from .routes import student, counselor, analytics, auth, users, analysis, alerts
+from .routes import student, counselor, analytics, auth, users, analysis, alerts, models
 
 
 @asynccontextmanager
@@ -49,6 +49,7 @@ app.include_router(analysis.router, prefix="/emotion", tags=["AI Analysis"])
 app.include_router(counselor.router, prefix="/counselor", tags=["Counselor"])
 app.include_router(alerts.router, prefix="/alerts", tags=["Alerts"])
 app.include_router(analytics.router, prefix="/analytics", tags=["Analytics & Dashboard"])
+app.include_router(models.router, prefix="/models", tags=["Model Management"])
 
 
 @app.get("/health", response_model=HealthCheckResponse, tags=["System"])

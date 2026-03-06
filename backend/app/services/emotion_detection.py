@@ -15,8 +15,17 @@ from typing import Dict, List, Optional
 
 from ..logging_config import logger
 
-# Current model version identifier
-MODEL_VERSION = "emotion-v0.2.0-keyword"
+# Fallback model version identifier
+_FALLBACK_VERSION = "emotion-v0.2.0-keyword"
+
+
+def _get_model_version() -> str:
+    """Get the active emotion detection model version from the registry."""
+    try:
+        from .model_registry import registry
+        return registry.get_active_version_string("emotion_detection")
+    except Exception:
+        return _FALLBACK_VERSION
 
 # Emotion lexicons — weighted keyword lists for each emotion category
 EMOTION_LEXICONS: Dict[str, Dict[str, float]] = {
@@ -82,7 +91,7 @@ class EmotionResult:
     predicted_emotion: str
     confidence_score: float
     emotion_scores: Dict[str, float]
-    model_version: str = MODEL_VERSION
+    model_version: str = ""
     word_matches: Dict[str, List[str]] = field(default_factory=dict)
 
 
@@ -121,11 +130,14 @@ def detect_emotion(text: Optional[str]) -> EmotionResult:
     Returns:
         EmotionResult with predicted emotion, confidence, and per-emotion scores.
     """
+    version = _get_model_version()
+
     if not text or not text.strip():
         return EmotionResult(
             predicted_emotion="neutral",
             confidence_score=0.5,
             emotion_scores={"neutral": 0.5},
+            model_version=version,
         )
 
     tokens = _tokenize(text)
@@ -134,6 +146,7 @@ def detect_emotion(text: Optional[str]) -> EmotionResult:
             predicted_emotion="neutral",
             confidence_score=0.5,
             emotion_scores={"neutral": 0.5},
+            model_version=version,
         )
 
     emotion_scores: Dict[str, float] = {emotion: 0.0 for emotion in EMOTION_LEXICONS}
@@ -163,6 +176,7 @@ def detect_emotion(text: Optional[str]) -> EmotionResult:
             predicted_emotion="neutral",
             confidence_score=0.4,
             emotion_scores={"neutral": 0.4},
+            model_version=version,
         )
 
     # Normalize scores to 0-1 range
@@ -193,5 +207,6 @@ def detect_emotion(text: Optional[str]) -> EmotionResult:
         predicted_emotion=predicted,
         confidence_score=confidence,
         emotion_scores={k: round(v, 4) for k, v in normalized.items()},
+        model_version=version,
         word_matches={k: v for k, v in word_matches.items() if v},
     )
