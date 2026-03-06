@@ -19,6 +19,7 @@ from ..database.schemas import (
     JournalEntryRequest,
 )
 from ..utils.sanitize import sanitize_text, sanitize_identifier, sanitize_name
+from ..logging_config import logger
 
 
 class StudentService:
@@ -181,6 +182,11 @@ class StudentService:
         self.db.add(record)
         await self.db.commit()
         await self.db.refresh(record)
+
+        # Trigger AI analysis if text is present
+        if record.text_input:
+            await self._run_ai_analysis(record)
+
         return record
 
     # ─── Journal Entry ──────────────────────────────────────
@@ -200,6 +206,11 @@ class StudentService:
         self.db.add(record)
         await self.db.commit()
         await self.db.refresh(record)
+
+        # Trigger AI analysis on journal text
+        if record.text_input:
+            await self._run_ai_analysis(record)
+
         return record
 
     # ─── Behavioral Records ─────────────────────────────────
@@ -285,13 +296,28 @@ class StudentService:
             scores = [r.emotion_score for r in checkins if r.emotion_score is not None]
             avg_emotion = round(sum(scores) / len(scores), 3) if scores else None
 
+        avg_sentiment = None
+        sentiment_scores = [
+            r.sentiment_score for r in records if r.sentiment_score is not None
+        ]
+        if sentiment_scores:
+            avg_sentiment = round(
+                sum(sentiment_scores) / len(sentiment_scores), 3
+            )
+
+        analyzed_count = sum(
+            1 for r in records if r.emotion_analysis is not None
+        )
+
         return {
             "student_id": student_id,
             "period_days": days,
             "total_records": len(records),
             "total_checkins": len(checkins),
             "total_journals": len(journals),
+            "analyzed_records": analyzed_count,
             "average_emotion_score": avg_emotion,
+            "average_sentiment_score": avg_sentiment,
             "latest_risk_level": (
                 student.risk_scores[-1].risk_level if student.risk_scores else None
             ),
@@ -299,6 +325,22 @@ class StudentService:
                 [a for a in student.alerts if a.status == "active"]
             ),
         }
+
+    # ─── AI Analysis Integration ────────────────────────────
+
+    async def _run_ai_analysis(self, record: BehavioralRecord) -> None:
+        """Run the AI analysis pipeline on a behavioral record.
+
+        Catches and logs errors to avoid breaking the main submission flow.
+        """
+        try:
+            from .ai_analysis import analyze_record
+            await analyze_record(self.db, record)
+        except Exception as e:
+            logger.error(
+                f"AI analysis failed for record_id={record.id}: {e}",
+                exc_info=True,
+            )
 
     # ─── Helpers ────────────────────────────────────────────
 

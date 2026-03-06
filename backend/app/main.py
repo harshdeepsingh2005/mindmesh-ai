@@ -12,6 +12,7 @@ from .database.schemas import HealthCheckResponse
 from .logging_config import logger
 from .routes import student, counselor, analytics
 from .routes import auth, users
+from .routes import analysis
 
 
 @asynccontextmanager
@@ -36,6 +37,7 @@ app = FastAPI(
 app.include_router(auth.router, prefix="/auth", tags=["Authentication"])
 app.include_router(users.router, prefix="/users", tags=["User Management"])
 app.include_router(student.router, prefix="/student", tags=["Student"])
+app.include_router(analysis.router, prefix="/emotion", tags=["AI Analysis"])
 app.include_router(counselor.router, prefix="/counselor", tags=["Counselor"])
 app.include_router(analytics.router, prefix="/analytics", tags=["Analytics"])
 

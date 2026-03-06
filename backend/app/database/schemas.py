@@ -184,6 +184,36 @@ class EmotionAnalysisResponse(BaseModel):
         from_attributes = True
 
 
+class EmotionAnalyzeRequest(BaseModel):
+    """Schema for standalone emotion analysis request."""
+    text_input: str = Field(..., min_length=1, max_length=5000)
+    student_id: Optional[str] = None
+
+
+class EmotionAnalyzeResponse(BaseModel):
+    """Schema for standalone emotion analysis response."""
+    emotion: Dict
+    sentiment: Dict
+
+
+class TrendAnalysisResponse(BaseModel):
+    """Schema for behavioral trend analysis response."""
+    student_id: str
+    period_days: int
+    total_records: int
+    data_points: int
+    emotion_trend: str
+    emotion_slope: float
+    avg_emotion_score: Optional[float] = None
+    emotion_volatility: float
+    checkin_count: int
+    journal_count: int
+    checkin_frequency: float
+    weekly_averages: List[Dict]
+    declining_flag: bool
+    disengagement_flag: bool
+
+
 # ─── Risk Score Schemas ─────────────────────────────────────
 
 
