@@ -1,7 +1,7 @@
 """MindMesh AI — Pydantic Schemas for Request/Response Validation."""
 
 from pydantic import BaseModel, EmailStr, Field
-from typing import Optional, Dict, List
+from typing import Any, Optional, Dict, List
 from datetime import datetime
 
 
@@ -282,11 +282,11 @@ class RiskThresholdsResponse(BaseModel):
 
 
 class AlertCreate(BaseModel):
-    """Schema for creating an alert."""
+    """Schema for creating an alert manually."""
     student_id: str
     risk_score: int = Field(..., ge=0, le=100)
     alert_type: str = Field(..., pattern="^(high_risk|info)$")
-    message: str
+    message: str = Field(..., min_length=1, max_length=2000)
 
 
 class AlertResponse(BaseModel):
@@ -301,6 +301,41 @@ class AlertResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class AlertListResponse(BaseModel):
+    """Schema for listing multiple alerts."""
+    alerts: List[AlertResponse]
+    total: int
+
+
+class AlertStatusUpdate(BaseModel):
+    """Schema for updating an alert's status."""
+    status: str = Field(
+        ...,
+        pattern="^(acknowledged|resolved|dismissed)$",
+        description="New status: acknowledged, resolved, or dismissed",
+    )
+
+
+class AlertBulkAcknowledge(BaseModel):
+    """Schema for bulk-acknowledging alerts."""
+    alert_ids: List[str] = Field(
+        ..., min_length=1, max_length=100,
+        description="List of alert IDs to acknowledge",
+    )
+
+
+class AlertCountResponse(BaseModel):
+    """Schema for open alert count (dashboard badge)."""
+    open_count: int
+
+
+class AlertNotificationResponse(BaseModel):
+    """Schema for notification dispatch result."""
+    alert_id: str
+    notifications_sent: int
+    notifications: List[Dict[str, Any]]
 
 
 # ─── Health Check ───────────────────────────────────────────

@@ -13,6 +13,7 @@ from .logging_config import logger
 from .routes import student, counselor, analytics
 from .routes import auth, users
 from .routes import analysis
+from .routes import alerts
 
 
 @asynccontextmanager
@@ -39,6 +40,7 @@ app.include_router(users.router, prefix="/users", tags=["User Management"])
 app.include_router(student.router, prefix="/student", tags=["Student"])
 app.include_router(analysis.router, prefix="/emotion", tags=["AI Analysis"])
 app.include_router(counselor.router, prefix="/counselor", tags=["Counselor"])
+app.include_router(alerts.router, prefix="/alerts", tags=["Alerts"])
 app.include_router(analytics.router, prefix="/analytics", tags=["Analytics"])
 
 

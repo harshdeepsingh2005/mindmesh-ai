@@ -3,6 +3,8 @@
 Coordinates emotion detection, sentiment analysis, and trend analysis.
 Stores all model predictions in the database via EmotionAnalysis records.
 After each analysis, triggers a risk re-assessment for the student.
+If the assessment produces a high-risk score, generates an alert and
+notifies teachers.
 
 This is the central service that routes invoke to analyze behavioral data.
 """
@@ -31,6 +33,8 @@ async def analyze_record(
     2. Analyze sentiment polarity
     3. Update record with scores
     4. Store EmotionAnalysis prediction in database
+    5. Trigger risk re-assessment for the student
+    6. Generate alert + notify teachers if high risk
 
     Args:
         db: Async database session.
@@ -86,19 +90,73 @@ async def analyze_record(
         f"high_risk={sentiment_result.high_risk_flag}"
     )
 
-    # ── Trigger risk re-assessment after new analysis ────────────
+    # ── Trigger risk re-assessment + alert generation ────────────
     try:
         from .risk_scoring import assess_student_risk
 
-        await assess_student_risk(db, record.student_id)
-        logger.info(
-            f"Risk re-assessment triggered for student={record.student_id}"
+        assessment = await assess_student_risk(
+            db, record.student_id, lookback_days=30
         )
+        logger.info(
+            f"Risk re-assessment after analysis: "
+            f"student_id={record.student_id}, "
+            f"score={assessment.composite_score}, "
+            f"level={assessment.risk_level}"
+        )
+
+        # Generate alert and notify teachers if high risk
+        from .alert_service import generate_and_notify
+
+        alert_result = await generate_and_notify(
+            db,
+            student_id=record.student_id,
+            risk_score=assessment.composite_score,
+            risk_level=assessment.risk_level,
+        )
+        if alert_result:
+            logger.warning(
+                f"Alert generated after analysis: "
+                f"alert_id={alert_result['alert_id']}, "
+                f"notifications={alert_result['notifications_sent']}"
+            )
+
     except Exception as exc:
         # Non-fatal — log but don't block the analysis response
-        logger.warning(
-            f"Risk re-assessment failed for student={record.student_id}: {exc}"
+        logger.error(
+            f"Post-analysis pipeline failed for "
+            f"student_id={record.student_id}: {exc}",
+            exc_info=True,
         )
+
+    # ── Immediate alert on high-risk content detection ───────────
+    if sentiment_result.high_risk_flag:
+        try:
+            from .alert_service import generate_alert, notify_teachers
+
+            alert = await generate_alert(
+                db,
+                student_id=record.student_id,
+                risk_score=100,
+                alert_type="high_risk",
+                message=(
+                    f"HIGH RISK CONTENT DETECTED in {record.activity_type}. "
+                    f"Keywords found: {', '.join(sentiment_result.high_risk_keywords_found)}. "
+                    "Immediate counselor intervention required."
+                ),
+                deduplicate_minutes=30,
+            )
+            if alert:
+                await notify_teachers(db, alert)
+                logger.warning(
+                    f"IMMEDIATE ALERT for high-risk content: "
+                    f"student_id={record.student_id}, "
+                    f"keywords={sentiment_result.high_risk_keywords_found}"
+                )
+        except Exception as exc:
+            logger.error(
+                f"High-risk alert generation failed: {exc}",
+                exc_info=True,
+            )
 
     return analysis
 
