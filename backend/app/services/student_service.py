@@ -30,7 +30,7 @@ class StudentService:
 
     # ─── Profile CRUD ───────────────────────────────────────
 
-    async def create_profile(self, payload: StudentCreate) -> Student:
+    async def create_profile(self, payload: StudentCreate, user_id: str = None) -> Student:
         """Create a new student profile."""
         # Check for duplicate student_identifier
         existing = await self.db.execute(
@@ -46,6 +46,7 @@ class StudentService:
 
         student = Student(
             id=str(uuid.uuid4()),
+            user_id=user_id,
             student_identifier=sanitize_identifier(payload.student_identifier),
             age=payload.age,
             school=sanitize_name(payload.school),

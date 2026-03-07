@@ -33,7 +33,7 @@ from ..services.risk_scoring import (
     RISK_THRESHOLDS,
     FACTOR_WEIGHTS,
 )
-from ..services.trend_analysis import analyze_trend
+from ..services.trend_analysis import analyze_trends
 from ..logging_config import logger
 
 router = APIRouter()
@@ -177,7 +177,7 @@ async def get_trajectory(
     current_user: User = Depends(require_roles(["counselor", "admin"])),
 ):
     """Return mood-trend and risk-score trajectory over the window."""
-    trend = await analyze_trend(db, student_id, days=days)
+    trend = await analyze_trends(db, student_id, days=days)
     risk_scores = await get_risk_history(db, student_id, limit=days)
 
     return {

@@ -40,7 +40,7 @@ from ..logging_config import logger
 
 from .sentiment_analysis import analyze_sentiment
 from .emotion_detection import detect_emotion
-from .trend_analysis import analyze_trend
+from .trend_analysis import analyze_trends
 
 # ── Constants ────────────────────────────────────────────────────
 
@@ -140,9 +140,9 @@ async def compute_risk_factors(
         select(BehavioralRecord)
         .where(
             BehavioralRecord.student_id == student_id,
-            BehavioralRecord.created_at >= cutoff,
+            BehavioralRecord.timestamp >= cutoff,
         )
-        .order_by(desc(BehavioralRecord.created_at))
+        .order_by(desc(BehavioralRecord.timestamp))
     )
     result = await db.execute(stmt)
     records: List[BehavioralRecord] = list(result.scalars().all())
@@ -208,7 +208,7 @@ async def compute_risk_factors(
     # ── Factor: trend_direction ──────────────────────────────────
     # Worsening trend → higher risk  (negative slope in mood trend)
     if len(records) >= 3:
-        trend = await analyze_trend(db, student_id, days=lookback_days)
+        trend = await analyze_trends(db, student_id, days=lookback_days)
         if trend and trend.get("mood_trend"):
             slope = trend["mood_trend"].get("slope", 0)
             # negative slope means deteriorating, scale ×20 and clamp

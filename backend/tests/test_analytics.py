@@ -50,6 +50,7 @@ class TestOverview:
 
         student = Student(
             student_identifier="STU-ANLY",
+            user_id=admin_user["id"],
             age=15,
             school="Analytics School",
             grade="10th",

@@ -39,7 +39,7 @@ async def create_student_profile(
 ):
     """Create a new student profile (admin/teacher only)."""
     svc = StudentService(db)
-    student = await svc.create_profile(payload)
+    student = await svc.create_profile(payload, user_id=current_user.id)
     return student
 
 

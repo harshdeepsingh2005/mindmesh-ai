@@ -3,7 +3,7 @@
 import pytest
 from httpx import AsyncClient
 
-from tests.conftest import auth_header
+from tests.conftest import auth_header, _make_user
 
 
 class TestAlertList:
@@ -45,6 +45,7 @@ class TestManualAlert:
 
         student = Student(
             student_identifier="STU-ALERT",
+            user_id=admin_user["id"],
             age=15,
             school="Alert School",
             grade="10th",
@@ -90,8 +91,14 @@ class TestBulkAcknowledge:
         from app.models.student import Student
         from app.models.alert import Alert
 
+        bulk_user = await _make_user(
+            db_session,
+            email="bulk@test.com",
+            role="student",
+        )
         student = Student(
             student_identifier="STU-BULK",
+            user_id=bulk_user["id"],
             age=14,
             school="Bulk School",
             grade="9th",
