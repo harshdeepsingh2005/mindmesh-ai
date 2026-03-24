@@ -15,6 +15,9 @@ from ..database.schemas import (
     JournalEntryRequest,
     BehavioralRecordResponse,
     BehavioralRecordListResponse,
+    SOSRequest,
+    PeerReportRequest,
+    AlertResponse,
 )
 from ..dependencies import get_current_user, require_roles
 from ..models.user import User
@@ -178,6 +181,40 @@ async def get_behavioral_records(
 
 
 # ─── Wellbeing History ──────────────────────────────────────
+
+
+@router.post(
+    "/sos",
+    response_model=AlertResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Trigger SOS alert",
+)
+async def submit_sos(
+    payload: SOSRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_roles(["student"])),
+):
+    """Student triggers an immediate SOS alert for counseling."""
+    svc = StudentService(db)
+    alert = await svc.trigger_sos(current_user, payload)
+    return alert
+
+
+@router.post(
+    "/report_peer",
+    response_model=AlertResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Anonymous peer intervention",
+)
+async def report_peer_concern(
+    payload: PeerReportRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_roles(["student"])),
+):
+    """Student anonymously reports a concern regarding a peer."""
+    svc = StudentService(db)
+    alert = await svc.report_peer(current_user, payload)
+    return alert
 
 
 @router.get(

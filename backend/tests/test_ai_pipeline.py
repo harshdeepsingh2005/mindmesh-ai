@@ -1,8 +1,13 @@
-"""Tests for the AI analysis pipeline — emotion detection & sentiment analysis."""
+"""Tests for the AI analysis pipeline — emotion clustering & sentiment analysis.
+
+Updated for the unsupervised ML pipeline:
+  • Emotion detection now uses K-Means clustering (EmotionResult has cluster_label)
+  • Sentiment analysis now uses VADER (SentimentResult has compound score)
+"""
 
 import pytest
 
-from app.services.emotion_detection import detect_emotion, EmotionResult, EMOTION_LEXICONS
+from app.services.emotion_detection import detect_emotion, EmotionResult
 from app.services.sentiment_analysis import (
     analyze_sentiment,
     SentimentResult,
@@ -10,82 +15,71 @@ from app.services.sentiment_analysis import (
 )
 
 
-# ─── Emotion Detection ──────────────────────────────────────────
+# ─── Emotion Detection (K-Means Clustering) ─────────────────────
 
 
 class TestEmotionDetection:
-    """Unit tests for detect_emotion()."""
+    """Unit tests for detect_emotion() — K-Means cluster assignment."""
 
-    def test_happy_text(self):
+    def test_detects_positive_text(self):
         result = detect_emotion("I am so happy and excited today!")
-        assert result.predicted_emotion == "happy"
+        assert isinstance(result, EmotionResult)
+        assert result.cluster_label != ""
         assert result.confidence_score > 0
 
-    def test_sad_text(self):
+    def test_detects_negative_text(self):
         result = detect_emotion("I feel really sad and lonely")
-        assert result.predicted_emotion == "sad"
+        assert isinstance(result, EmotionResult)
         assert result.confidence_score > 0
 
-    def test_anxious_text(self):
+    def test_detects_anxious_text(self):
         result = detect_emotion("I'm very anxious and worried about exams")
-        assert result.predicted_emotion == "anxious"
+        assert isinstance(result, EmotionResult)
         assert result.confidence_score > 0
 
-    def test_angry_text(self):
+    def test_detects_angry_text(self):
         result = detect_emotion("I am furious and really angry right now")
-        assert result.predicted_emotion == "angry"
+        assert isinstance(result, EmotionResult)
         assert result.confidence_score > 0
 
     def test_neutral_text(self):
         result = detect_emotion("Today was an ordinary day at school")
-        # Should either be neutral or have low confidence
         assert isinstance(result, EmotionResult)
 
     def test_empty_string(self):
         result = detect_emotion("")
-        assert result.predicted_emotion == "neutral"
+        assert result.cluster_label == "neutral"
         assert result.confidence_score == 0.5
 
     def test_none_input(self):
         result = detect_emotion(None)
-        assert result.predicted_emotion == "neutral"
+        assert result.cluster_label == "neutral"
         assert result.confidence_score == 0.5
-
-    def test_negation_handling(self):
-        result = detect_emotion("I am not happy at all")
-        # Negation should reduce happy score
-        assert result.predicted_emotion != "happy" or result.confidence_score < 0.5
-
-    def test_intensifier_boosting(self):
-        base = detect_emotion("I feel sad")
-        intense = detect_emotion("I feel extremely sad")
-        # Intensified version should have higher or equal confidence
-        assert intense.confidence_score >= base.confidence_score * 0.8
 
     def test_model_version_present(self):
         result = detect_emotion("test text")
         assert result.model_version != ""
         assert isinstance(result.model_version, str)
 
-    def test_emotion_scores_all_categories(self):
+    def test_returns_cluster_distances(self):
         result = detect_emotion("I feel happy but also a bit anxious")
-        # Should have scores for all emotion categories
-        for emotion in EMOTION_LEXICONS:
-            assert emotion in result.emotion_scores
+        # Cluster distances are only populated when the engine is fitted
+        assert isinstance(result.cluster_distances, dict)
 
-    def test_word_matches_returned(self):
+    def test_returns_top_terms(self):
         result = detect_emotion("I am very happy and excited")
-        assert isinstance(result.word_matches, dict)
-        # Should have at least one match for happy
-        if "happy" in result.word_matches:
-            assert len(result.word_matches["happy"]) > 0
+        assert isinstance(result.top_terms, list)
+
+    def test_predicted_cluster_is_int(self):
+        result = detect_emotion("Today was a great day")
+        assert isinstance(result.predicted_cluster, int)
 
 
-# ─── Sentiment Analysis ─────────────────────────────────────────
+# ─── Sentiment Analysis (VADER) ─────────────────────────────────
 
 
 class TestSentimentAnalysis:
-    """Unit tests for analyze_sentiment()."""
+    """Unit tests for analyze_sentiment() — VADER sentiment analyser."""
 
     def test_positive_text(self):
         result = analyze_sentiment("I love this school, it's great and wonderful!")
@@ -140,3 +134,12 @@ class TestSentimentAnalysis:
         result = analyze_sentiment("test text")
         assert result.model_version != ""
         assert isinstance(result.model_version, str)
+
+    def test_neutral_score_present(self):
+        result = analyze_sentiment("This is some text")
+        assert 0.0 <= result.neutral_score <= 1.0
+
+    def test_vader_raw_scores(self):
+        result = analyze_sentiment("I love this!")
+        assert isinstance(result.vader_raw, dict)
+        assert "compound" in result.vader_raw

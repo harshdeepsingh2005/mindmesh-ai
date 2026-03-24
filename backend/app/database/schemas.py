@@ -194,6 +194,7 @@ class EmotionAnalyzeResponse(BaseModel):
     """Schema for standalone emotion analysis response."""
     emotion: Dict
     sentiment: Dict
+    topic: Optional[Dict] = None
 
 
 class TrendAnalysisResponse(BaseModel):
@@ -285,7 +286,7 @@ class AlertCreate(BaseModel):
     """Schema for creating an alert manually."""
     student_id: str
     risk_score: int = Field(..., ge=0, le=100)
-    alert_type: str = Field(..., pattern="^(high_risk|info)$")
+    alert_type: str = Field(..., pattern="^(high_risk|info|sos|peer_concern)$")
     message: str = Field(..., min_length=1, max_length=2000)
 
 
@@ -316,6 +317,19 @@ class AlertStatusUpdate(BaseModel):
         pattern="^(acknowledged|resolved|dismissed)$",
         description="New status: acknowledged, resolved, or dismissed",
     )
+
+
+class SOSRequest(BaseModel):
+    """Schema for SOS request."""
+    location: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class PeerReportRequest(BaseModel):
+    """Schema for reporting a peer."""
+    peer_identifier: str = Field(..., min_length=1, max_length=255)
+    concern: str = Field(..., min_length=10, max_length=2000)
+
 
 
 class AlertBulkAcknowledge(BaseModel):

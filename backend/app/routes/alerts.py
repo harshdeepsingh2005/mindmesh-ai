@@ -319,3 +319,56 @@ async def send_alert_notifications(
         notifications_sent=len(notifications),
         notifications=notifications,
     )
+
+
+# ── AI-Assisted De-escalation Primer ─────────────────────────────
+
+
+@router.get(
+    "/{alert_id}/primer",
+    summary="Get AI-assisted de-escalation primer",
+)
+async def get_alert_primer(
+    alert_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_roles(["admin", "teacher", "counselor"])),
+):
+    """Generate an actionable de-escalation plan for the counselor."""
+    alert = await get_alert_by_id(db, alert_id)
+    if not alert:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Alert with id={alert_id} not found.",
+        )
+
+    # In a full app, we would pass the alert.message and student's recent journal 
+    # history to an LLM (OpenAI/Anthropic) to generate this.
+    # For now, we use a heuristic mock based on alert type.
+    
+    primer = ""
+    if alert.alert_type.lower() == "sos":
+        primer = (
+            "1. IMMEDIATE ACTION: Contact Campus Security and dispatch to student's location immediately.\n"
+            "2. Keep the student on the line if they call; do not hang up.\n"
+            "3. Ask direct questions: 'Are you safe right now?' 'Do you have a plan?'\n"
+            "4. Validate their pain without judgment: 'I hear how overwhelmed you are.'"
+        )
+    elif alert.alert_type.lower() == "peer_concern":
+        primer = (
+            "1. DISCREET CHECK-IN: Reach out to the student for a 'routine' check-in.\n"
+            "2. Do NOT mention the peer who reported them to maintain trust.\n"
+            "3. Open-ended questions: 'How have things been balancing lately?'\n"
+            "4. Look for signs of the reported concern in their body language."
+        )
+    else:
+        primer = (
+            "1. Approach with empathy: 'I noticed from your recent check-ins that things seem heavy right now.'\n"
+            "2. Focus on their specific stressor mentioned in the alert: " + alert.message[:50] + "...\n"
+            "3. Avoid toxic positivity (don't say 'it will get better'). Instead, say 'That sounds really difficult.'\n"
+            "4. Collaborate on a small, actionable next step for today."
+        )
+        
+    return {
+        "alert_id": alert.id,
+        "primer": primer
+    }

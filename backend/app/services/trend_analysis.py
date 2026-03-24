@@ -1,16 +1,22 @@
-"""MindMesh AI — Behavioral Trend Analysis Module.
+"""MindMesh AI — Behavioral Trend Analysis Module (Unsupervised).
 
-Analyzes temporal patterns in student behavioral data to detect
-deterioration trends, stability, or improvement. Uses statistical
-methods on time-series behavioral records.
+Analyzes temporal patterns in student behavioral data using
+statistical methods:
 
-Outputs trend indicators that feed into the risk scoring engine.
+  • Linear regression slope for trend direction
+  • Z-score anomaly detection on time-series
+  • Change point detection via rolling statistics
+  • Disengagement detection through activity frequency
+
+All methods are unsupervised — they detect statistical deviations
+from the student's own baseline, NOT from labelled data.
 """
 
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 
+import numpy as np
 from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -28,6 +34,15 @@ class TrendDataPoint:
 
 
 @dataclass
+class AnomalyPoint:
+    """A detected anomaly in the time series."""
+    timestamp: datetime
+    value: float
+    z_score: float
+    is_anomaly: bool
+
+
+@dataclass
 class TrendResult:
     """Result of behavioral trend analysis."""
     student_id: str
@@ -36,8 +51,8 @@ class TrendResult:
     data_points: int
 
     # Emotion trend
-    emotion_trend: str  # improving, declining, stable, insufficient_data
-    emotion_slope: float  # positive = improving, negative = declining
+    emotion_trend: str        # improving, declining, stable, insufficient_data
+    emotion_slope: float      # positive = improving, negative = declining
     avg_emotion_score: Optional[float]
     emotion_volatility: float  # standard deviation of scores
 
@@ -49,9 +64,18 @@ class TrendResult:
     # Weekly aggregates
     weekly_averages: List[Dict]
 
+    # Time-series anomalies
+    anomaly_points: List[AnomalyPoint]
+    anomaly_count: int
+
+    # Change point detection
+    change_point_detected: bool
+    change_point_index: Optional[int]
+
     # Flags
-    declining_flag: bool  # True if clear downward trend detected
-    disengagement_flag: bool  # True if activity frequency dropped significantly
+    declining_flag: bool         # True if clear downward trend
+    disengagement_flag: bool     # True if activity dropped
+    volatility_flag: bool        # True if high emotional instability
 
 
 async def fetch_student_records(
@@ -59,16 +83,7 @@ async def fetch_student_records(
     student_id: str,
     days: int = 30,
 ) -> List[TrendDataPoint]:
-    """Fetch behavioral records for trend analysis.
-
-    Args:
-        db: Async database session.
-        student_id: The student's ID.
-        days: Number of days to look back.
-
-    Returns:
-        List of TrendDataPoint objects sorted by timestamp.
-    """
+    """Fetch behavioral records for trend analysis."""
     since = datetime.utcnow() - timedelta(days=days)
 
     result = await db.execute(
@@ -95,55 +110,103 @@ async def fetch_student_records(
 
 
 def _calculate_slope(values: List[float]) -> float:
-    """Calculate linear regression slope for a series of values.
-
-    Uses simple least-squares linear regression.
-
-    Args:
-        values: Ordered list of float values.
-
-    Returns:
-        Slope coefficient. Positive = upward trend, negative = downward.
-    """
+    """Calculate linear regression slope (least squares)."""
     n = len(values)
     if n < 2:
         return 0.0
 
-    x_vals = list(range(n))
-    x_mean = sum(x_vals) / n
-    y_mean = sum(values) / n
+    x = np.arange(n, dtype=np.float64)
+    y = np.array(values, dtype=np.float64)
 
-    numerator = sum((x - x_mean) * (y - y_mean) for x, y in zip(x_vals, values))
-    denominator = sum((x - x_mean) ** 2 for x in x_vals)
+    x_mean = x.mean()
+    y_mean = y.mean()
+
+    numerator = np.sum((x - x_mean) * (y - y_mean))
+    denominator = np.sum((x - x_mean) ** 2)
 
     if denominator == 0:
         return 0.0
 
-    return numerator / denominator
+    return float(numerator / denominator)
 
 
-def _calculate_std(values: List[float]) -> float:
-    """Calculate standard deviation of a list of values."""
-    n = len(values)
-    if n < 2:
-        return 0.0
-    mean = sum(values) / n
-    variance = sum((v - mean) ** 2 for v in values) / (n - 1)
-    return variance ** 0.5
+def _z_score_anomalies(
+    values: List[float],
+    threshold: float = 2.0,
+) -> List[Tuple[int, float, float, bool]]:
+    """Detect anomalies in a sequence using z-scores.
+
+    A point is anomalous if |z-score| > threshold.
+
+    Args:
+        values: Time-series values.
+        threshold: Z-score threshold for anomaly.
+
+    Returns:
+        List of (index, value, z_score, is_anomaly) tuples.
+    """
+    if len(values) < 3:
+        return [(i, v, 0.0, False) for i, v in enumerate(values)]
+
+    arr = np.array(values, dtype=np.float64)
+    mean = arr.mean()
+    std = arr.std()
+
+    if std == 0:
+        return [(i, v, 0.0, False) for i, v in enumerate(values)]
+
+    results = []
+    for i, v in enumerate(values):
+        z = (v - mean) / std
+        results.append((i, v, float(z), abs(z) > threshold))
+
+    return results
+
+
+def _detect_change_point(
+    values: List[float],
+    window: int = 5,
+) -> Optional[int]:
+    """Detect change points using CUSUM-inspired rolling mean shift.
+
+    Compares rolling mean of first half vs second half.  If the
+    difference exceeds a threshold, a change point is detected.
+
+    Args:
+        values: Time-series values.
+        window: Minimum window size for comparison.
+
+    Returns:
+        Index of detected change point, or None.
+    """
+    if len(values) < window * 2:
+        return None
+
+    arr = np.array(values, dtype=np.float64)
+    n = len(arr)
+    max_diff = 0.0
+    best_point = None
+    overall_std = arr.std()
+
+    if overall_std == 0:
+        return None
+
+    for i in range(window, n - window):
+        left_mean = arr[:i].mean()
+        right_mean = arr[i:].mean()
+        diff = abs(right_mean - left_mean) / overall_std
+
+        if diff > max_diff and diff > 1.5:  # threshold
+            max_diff = diff
+            best_point = i
+
+    return best_point
 
 
 def _compute_weekly_averages(
     data_points: List[TrendDataPoint], days: int
 ) -> List[Dict]:
-    """Compute weekly average emotion scores.
-
-    Args:
-        data_points: Sorted list of data points.
-        days: Total period in days.
-
-    Returns:
-        List of weekly aggregate dicts.
-    """
+    """Compute weekly average emotion scores."""
     if not data_points:
         return []
 
@@ -161,12 +224,14 @@ def _compute_weekly_averages(
     result = []
     for week_num in sorted(weeks.keys()):
         scores = weeks[week_num]
+        scores_arr = np.array(scores)
         result.append({
             "weeks_ago": week_num,
-            "avg_emotion_score": round(sum(scores) / len(scores), 4),
+            "avg_emotion_score": round(float(scores_arr.mean()), 4),
             "record_count": len(scores),
-            "min_score": round(min(scores), 4),
-            "max_score": round(max(scores), 4),
+            "min_score": round(float(scores_arr.min()), 4),
+            "max_score": round(float(scores_arr.max()), 4),
+            "std_score": round(float(scores_arr.std()), 4),
         })
 
     return result
@@ -177,19 +242,11 @@ async def analyze_trends(
     student_id: str,
     days: int = 30,
 ) -> TrendResult:
-    """Analyze behavioral trends for a student over a time period.
+    """Analyze behavioral trends with unsupervised anomaly detection.
 
-    Examines emotion scores, activity frequency, and weekly patterns
-    to determine if the student's wellbeing is improving, declining,
-    or stable.
-
-    Args:
-        db: Async database session.
-        student_id: The student's ID.
-        days: Number of days to analyze (default 30).
-
-    Returns:
-        TrendResult with comprehensive trend analysis.
+    Examines emotion scores, activity frequency, z-score anomalies,
+    and change points to determine if the student's wellbeing is
+    changing.
     """
     data_points = await fetch_student_records(db, student_id, days)
 
@@ -203,22 +260,44 @@ async def analyze_trends(
     ]
 
     # Compute metrics
+    anomaly_points: List[AnomalyPoint] = []
+    change_point = None
+    volatility_flag = False
+
     if len(emotion_scores) >= 3:
         emotion_slope = _calculate_slope(emotion_scores)
-        avg_emotion = sum(emotion_scores) / len(emotion_scores)
-        volatility = _calculate_std(emotion_scores)
+        avg_emotion = float(np.mean(emotion_scores))
+        volatility = float(np.std(emotion_scores))
 
-        # Determine trend direction
+        # Trend direction
         if emotion_slope > 0.02:
             trend = "improving"
         elif emotion_slope < -0.02:
             trend = "declining"
         else:
             trend = "stable"
+
+        # Z-score anomaly detection
+        z_results = _z_score_anomalies(emotion_scores, threshold=2.0)
+        for i, val, z, is_anom in z_results:
+            if is_anom and i < len(data_points):
+                anomaly_points.append(AnomalyPoint(
+                    timestamp=data_points[i].timestamp,
+                    value=val,
+                    z_score=round(z, 4),
+                    is_anomaly=True,
+                ))
+
+        # Change point detection
+        change_point = _detect_change_point(emotion_scores)
+
+        # Volatility flag
+        volatility_flag = volatility > 0.3
+
     elif len(emotion_scores) > 0:
         emotion_slope = 0.0
-        avg_emotion = sum(emotion_scores) / len(emotion_scores)
-        volatility = _calculate_std(emotion_scores) if len(emotion_scores) > 1 else 0.0
+        avg_emotion = float(np.mean(emotion_scores))
+        volatility = float(np.std(emotion_scores)) if len(emotion_scores) > 1 else 0.0
         trend = "insufficient_data"
     else:
         emotion_slope = 0.0
@@ -226,14 +305,14 @@ async def analyze_trends(
         volatility = 0.0
         trend = "insufficient_data"
 
-    # Activity frequency (checkins per week)
+    # Activity frequency
     weeks_in_period = max(days / 7, 1)
     checkin_frequency = round(checkin_count / weeks_in_period, 2)
 
     # Weekly averages
     weekly_averages = _compute_weekly_averages(data_points, days)
 
-    # Detect disengagement (activity dropped in recent week vs overall average)
+    # Disengagement detection
     disengagement_flag = False
     if len(weekly_averages) >= 2:
         recent_week = weekly_averages[-1]
@@ -258,13 +337,20 @@ async def analyze_trends(
         journal_count=journal_count,
         checkin_frequency=checkin_frequency,
         weekly_averages=weekly_averages,
+        anomaly_points=anomaly_points,
+        anomaly_count=len(anomaly_points),
+        change_point_detected=change_point is not None,
+        change_point_index=change_point,
         declining_flag=declining_flag,
         disengagement_flag=disengagement_flag,
+        volatility_flag=volatility_flag,
     )
 
     logger.info(
         f"Trend analysis: student_id={student_id}, trend={trend}, "
-        f"slope={emotion_slope:.6f}, records={total_records}"
+        f"slope={emotion_slope:.6f}, records={total_records}, "
+        f"anomalies={len(anomaly_points)}, "
+        f"change_point={'yes' if change_point else 'no'}"
     )
 
     return result

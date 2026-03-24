@@ -1,32 +1,79 @@
-"""MindMesh AI — Model Evaluation Metrics.
+"""MindMesh AI — Model Evaluation Metrics (Unsupervised).
 
-Provides standardised evaluation metrics for all AI models:
-  • Emotion detection accuracy, precision, recall, F1
-  • Sentiment analysis correlation and error metrics
-  • Risk scoring calibration and discrimination metrics
-  • Per-class breakdowns and confusion matrices
-  • Model comparison utilities
+Provides evaluation metrics for unsupervised models:
+  • Clustering: silhouette score, Calinski-Harabasz index,
+    Davies-Bouldin index, cluster distribution
+  • Anomaly detection: anomaly rate, score distribution,
+    consistency metrics
+  • Topic models: reconstruction error, topic coherence,
+    topic prevalence distribution
+  • Time-series: trend stability, drift detection
 
-All metrics follow scikit-learn conventions where possible.
+All metrics are designed for models that operate WITHOUT
+labelled data — no accuracy, F1, or confusion matrices.
 """
 
 from __future__ import annotations
 
 import math
-from collections import Counter, defaultdict
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+import numpy as np
+from sklearn.metrics import (
+    silhouette_score,
+    calinski_harabasz_score,
+    davies_bouldin_score,
+)
+
 from ..logging_config import logger
 
 
-# ─── Data Classes ────────────────────────────────────────────────
+# ── Data Classes ────────────────────────────────────────────────
 
 
 @dataclass
-class ClassificationMetrics:
-    """Metrics for a single classification model evaluation run."""
+class ClusteringMetrics:
+    """Metrics for evaluating clustering quality (unsupervised)."""
+
+    model_name: str
+    model_version: str
+    evaluated_at: datetime = field(
+        default_factory=lambda: datetime.now(timezone.utc)
+    )
+    total_samples: int = 0
+    n_clusters: int = 0
+
+    # Internal validation indices
+    silhouette_score: float = 0.0       # [-1, 1] higher = better
+    calinski_harabasz: float = 0.0      # higher = better
+    davies_bouldin: float = 0.0         # lower = better
+
+    # Cluster distribution
+    cluster_sizes: Dict[int, int] = field(default_factory=dict)
+    cluster_balance: float = 0.0        # entropy of cluster sizes (higher = more balanced)
+
+    # Inertia (K-Means only)
+    inertia: float = 0.0
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "silhouette_score": round(self.silhouette_score, 4),
+            "calinski_harabasz": round(self.calinski_harabasz, 4),
+            "davies_bouldin": round(self.davies_bouldin, 4),
+            "n_clusters": self.n_clusters,
+            "total_samples": self.total_samples,
+            "cluster_sizes": self.cluster_sizes,
+            "cluster_balance": round(self.cluster_balance, 4),
+            "inertia": round(self.inertia, 4),
+        }
+
+
+@dataclass
+class AnomalyMetrics:
+    """Metrics for evaluating anomaly detection (unsupervised)."""
 
     model_name: str
     model_version: str
@@ -35,68 +82,55 @@ class ClassificationMetrics:
     )
     total_samples: int = 0
 
-    # Overall metrics
-    accuracy: float = 0.0
-    macro_precision: float = 0.0
-    macro_recall: float = 0.0
-    macro_f1: float = 0.0
-    weighted_f1: float = 0.0
+    # Anomaly statistics
+    anomaly_count: int = 0
+    anomaly_rate: float = 0.0
+    score_mean: float = 0.0
+    score_std: float = 0.0
+    score_min: float = 0.0
+    score_max: float = 0.0
 
-    # Per-class metrics
-    per_class: Dict[str, Dict[str, float]] = field(default_factory=dict)
+    # Score distribution (histogram)
+    score_distribution: List[Dict[str, float]] = field(default_factory=list)
 
-    # Confusion matrix: {true_label: {predicted_label: count}}
-    confusion_matrix: Dict[str, Dict[str, int]] = field(default_factory=dict)
-
-    # Class labels in order
-    labels: List[str] = field(default_factory=list)
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "anomaly_count": self.anomaly_count,
+            "anomaly_rate": round(self.anomaly_rate, 4),
+            "score_mean": round(self.score_mean, 4),
+            "score_std": round(self.score_std, 4),
+            "score_min": round(self.score_min, 4),
+            "score_max": round(self.score_max, 4),
+            "total_samples": self.total_samples,
+        }
 
 
 @dataclass
-class RegressionMetrics:
-    """Metrics for regression / continuous-score evaluation."""
+class TopicMetrics:
+    """Metrics for evaluating topic models (unsupervised)."""
 
     model_name: str
     model_version: str
     evaluated_at: datetime = field(
         default_factory=lambda: datetime.now(timezone.utc)
     )
-    total_samples: int = 0
+    total_documents: int = 0
+    n_topics: int = 0
 
-    mae: float = 0.0  # Mean Absolute Error
-    mse: float = 0.0  # Mean Squared Error
-    rmse: float = 0.0  # Root Mean Squared Error
-    r_squared: float = 0.0  # Coefficient of determination
-    pearson_correlation: float = 0.0
+    reconstruction_error: float = 0.0   # NMF reconstruction error
+    topic_prevalence: Dict[int, float] = field(default_factory=dict)
+    avg_topic_coherence: float = 0.0     # average pairwise term similarity
 
-    # Calibration: predicted vs actual in buckets
-    calibration_buckets: List[Dict[str, float]] = field(default_factory=list)
-
-
-@dataclass
-class RiskCalibrationMetrics:
-    """Specialised metrics for the risk scoring model."""
-
-    model_name: str = "risk_scoring"
-    model_version: str = "1.0.0"
-    evaluated_at: datetime = field(
-        default_factory=lambda: datetime.now(timezone.utc)
-    )
-    total_samples: int = 0
-
-    # Level classification
-    level_accuracy: float = 0.0
-    level_metrics: Dict[str, Dict[str, float]] = field(default_factory=dict)
-    level_confusion: Dict[str, Dict[str, int]] = field(default_factory=dict)
-
-    # Score regression
-    score_mae: float = 0.0
-    score_rmse: float = 0.0
-    score_correlation: float = 0.0
-
-    # Discrimination: can the model separate high from low risk?
-    auc_high_vs_rest: Optional[float] = None
-    separation_score: float = 0.0  # mean(high) - mean(low) / pooled_std
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "reconstruction_error": round(self.reconstruction_error, 4),
+            "n_topics": self.n_topics,
+            "total_documents": self.total_documents,
+            "topic_prevalence": {
+                k: round(v, 4) for k, v in self.topic_prevalence.items()
+            },
+            "avg_topic_coherence": round(self.avg_topic_coherence, 4),
+        }
 
 
 @dataclass
@@ -113,299 +147,217 @@ class ModelComparison:
     )
 
 
-# ─── Classification Evaluation ───────────────────────────────────
+# ── Clustering Evaluation ───────────────────────────────────────
 
 
-def evaluate_classification(
-    y_true: List[str],
-    y_pred: List[str],
-    model_name: str = "emotion_detection",
+def evaluate_clustering(
+    X: np.ndarray,
+    labels: np.ndarray,
+    model_name: str = "clustering",
     model_version: str = "1.0.0",
-) -> ClassificationMetrics:
-    """Compute full classification metrics from predictions.
+    inertia: float = 0.0,
+) -> ClusteringMetrics:
+    """Evaluate clustering quality using internal validation indices.
 
     Args:
-        y_true: Ground-truth labels.
-        y_pred: Predicted labels.
+        X: Feature matrix (samples × features).
+        labels: Cluster assignments.
         model_name: Name of the model.
         model_version: Version string.
+        inertia: K-Means inertia (optional).
 
     Returns:
-        ClassificationMetrics with all computed values.
+        ClusteringMetrics with all computed values.
     """
-    assert len(y_true) == len(y_pred), "y_true and y_pred must be same length"
-    n = len(y_true)
+    n = len(labels)
+    unique_labels = set(labels)
+    n_clusters = len(unique_labels)
 
-    if n == 0:
-        return ClassificationMetrics(
-            model_name=model_name, model_version=model_version
+    if n < 2 or n_clusters < 2:
+        return ClusteringMetrics(
+            model_name=model_name,
+            model_version=model_version,
+            total_samples=n,
+            n_clusters=n_clusters,
         )
 
-    labels = sorted(set(y_true) | set(y_pred))
+    # Compute metrics
+    sil = silhouette_score(X, labels)
+    ch = calinski_harabasz_score(X, labels)
+    db = davies_bouldin_score(X, labels)
 
-    # Build confusion matrix
-    confusion: Dict[str, Dict[str, int]] = {
-        t: {p: 0 for p in labels} for t in labels
-    }
-    for t, p in zip(y_true, y_pred):
-        confusion[t][p] += 1
+    # Cluster sizes and balance
+    cluster_counts = Counter(labels)
+    cluster_sizes = {int(k): int(v) for k, v in cluster_counts.items()}
 
-    # Accuracy
-    correct = sum(1 for t, p in zip(y_true, y_pred) if t == p)
-    accuracy = correct / n
+    # Balance (normalised entropy)
+    probs = [c / n for c in cluster_counts.values()]
+    entropy = -sum(p * math.log2(p) for p in probs if p > 0)
+    max_entropy = math.log2(n_clusters) if n_clusters > 1 else 1.0
+    balance = entropy / max_entropy if max_entropy > 0 else 0.0
 
-    # Per-class precision, recall, F1
-    per_class: Dict[str, Dict[str, float]] = {}
-    for label in labels:
-        tp = confusion[label][label]
-        fp = sum(confusion[t][label] for t in labels if t != label)
-        fn = sum(confusion[label][p] for p in labels if p != label)
-
-        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-        f1 = (
-            2 * precision * recall / (precision + recall)
-            if (precision + recall) > 0
-            else 0.0
-        )
-        support = tp + fn
-
-        per_class[label] = {
-            "precision": round(precision, 4),
-            "recall": round(recall, 4),
-            "f1": round(f1, 4),
-            "support": support,
-        }
-
-    # Macro averages
-    num_classes = len(labels)
-    macro_precision = sum(pc["precision"] for pc in per_class.values()) / num_classes
-    macro_recall = sum(pc["recall"] for pc in per_class.values()) / num_classes
-    macro_f1 = sum(pc["f1"] for pc in per_class.values()) / num_classes
-
-    # Weighted F1
-    total_support = sum(pc["support"] for pc in per_class.values())
-    weighted_f1 = (
-        sum(pc["f1"] * pc["support"] for pc in per_class.values()) / total_support
-        if total_support > 0
-        else 0.0
-    )
-
-    metrics = ClassificationMetrics(
+    metrics = ClusteringMetrics(
         model_name=model_name,
         model_version=model_version,
         total_samples=n,
-        accuracy=round(accuracy, 4),
-        macro_precision=round(macro_precision, 4),
-        macro_recall=round(macro_recall, 4),
-        macro_f1=round(macro_f1, 4),
-        weighted_f1=round(weighted_f1, 4),
-        per_class=per_class,
-        confusion_matrix=confusion,
-        labels=labels,
+        n_clusters=n_clusters,
+        silhouette_score=round(sil, 4),
+        calinski_harabasz=round(ch, 4),
+        davies_bouldin=round(db, 4),
+        cluster_sizes=cluster_sizes,
+        cluster_balance=round(balance, 4),
+        inertia=inertia,
     )
 
     logger.info(
-        f"Classification eval: model={model_name} v{model_version}, "
-        f"n={n}, accuracy={accuracy:.4f}, macro_f1={macro_f1:.4f}"
+        f"Clustering eval: {model_name} v{model_version}, "
+        f"n={n}, k={n_clusters}, silhouette={sil:.4f}, "
+        f"CH={ch:.4f}, DB={db:.4f}"
     )
 
     return metrics
 
 
-# ─── Regression Evaluation ───────────────────────────────────────
+# ── Anomaly Evaluation ──────────────────────────────────────────
 
 
-def evaluate_regression(
-    y_true: List[float],
-    y_pred: List[float],
-    model_name: str = "sentiment_analysis",
+def evaluate_anomaly_detection(
+    scores: List[float],
+    predictions: List[int],
+    model_name: str = "anomaly_detection",
     model_version: str = "1.0.0",
     num_buckets: int = 10,
-) -> RegressionMetrics:
-    """Compute regression metrics for continuous predictions.
+) -> AnomalyMetrics:
+    """Evaluate anomaly detection model.
 
     Args:
-        y_true: Ground-truth values.
-        y_pred: Predicted values.
+        scores: Anomaly scores for each sample.
+        predictions: Binary predictions (-1 = anomaly, 1 = normal).
         model_name: Name of the model.
         model_version: Version string.
-        num_buckets: Number of calibration buckets.
+        num_buckets: Number of histogram buckets.
 
     Returns:
-        RegressionMetrics with all computed values.
+        AnomalyMetrics with score distribution.
     """
-    assert len(y_true) == len(y_pred), "y_true and y_pred must be same length"
-    n = len(y_true)
+    n = len(scores)
 
     if n == 0:
-        return RegressionMetrics(
-            model_name=model_name, model_version=model_version
+        return AnomalyMetrics(
+            model_name=model_name,
+            model_version=model_version,
         )
 
-    # MAE, MSE, RMSE
-    errors = [t - p for t, p in zip(y_true, y_pred)]
-    abs_errors = [abs(e) for e in errors]
-    sq_errors = [e ** 2 for e in errors]
+    scores_arr = np.array(scores)
+    anomaly_count = int(sum(1 for p in predictions if p == -1))
 
-    mae = sum(abs_errors) / n
-    mse = sum(sq_errors) / n
-    rmse = math.sqrt(mse)
+    # Score distribution histogram
+    hist, bin_edges = np.histogram(scores_arr, bins=num_buckets)
+    distribution = [
+        {
+            "bucket": i,
+            "range_low": round(float(bin_edges[i]), 4),
+            "range_high": round(float(bin_edges[i + 1]), 4),
+            "count": int(hist[i]),
+        }
+        for i in range(len(hist))
+    ]
 
-    # R²
-    mean_true = sum(y_true) / n
-    ss_tot = sum((t - mean_true) ** 2 for t in y_true)
-    ss_res = sum((t - p) ** 2 for t, p in zip(y_true, y_pred))
-    r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0.0
-
-    # Pearson correlation
-    pearson = _pearson_correlation(y_true, y_pred)
-
-    # Calibration buckets
-    calibration_buckets = _compute_calibration(y_true, y_pred, num_buckets)
-
-    metrics = RegressionMetrics(
+    metrics = AnomalyMetrics(
         model_name=model_name,
         model_version=model_version,
         total_samples=n,
-        mae=round(mae, 4),
-        mse=round(mse, 4),
-        rmse=round(rmse, 4),
-        r_squared=round(r_squared, 4),
-        pearson_correlation=round(pearson, 4),
-        calibration_buckets=calibration_buckets,
+        anomaly_count=anomaly_count,
+        anomaly_rate=round(anomaly_count / n, 4),
+        score_mean=round(float(scores_arr.mean()), 4),
+        score_std=round(float(scores_arr.std()), 4),
+        score_min=round(float(scores_arr.min()), 4),
+        score_max=round(float(scores_arr.max()), 4),
+        score_distribution=distribution,
     )
 
     logger.info(
-        f"Regression eval: model={model_name} v{model_version}, "
-        f"n={n}, MAE={mae:.4f}, R²={r_squared:.4f}"
+        f"Anomaly eval: {model_name} v{model_version}, "
+        f"n={n}, anomalies={anomaly_count}, "
+        f"rate={anomaly_count/n:.4f}, "
+        f"score μ={scores_arr.mean():.4f}"
     )
 
     return metrics
 
 
-# ─── Risk Scoring Evaluation ────────────────────────────────────
+# ── Topic Model Evaluation ──────────────────────────────────────
 
 
-def evaluate_risk_scoring(
-    true_scores: List[int],
-    pred_scores: List[int],
-    true_levels: List[str],
-    pred_levels: List[str],
+def evaluate_topic_model(
+    reconstruction_error: float,
+    topic_prevalences: Dict[int, float],
+    model_name: str = "topic_discovery",
     model_version: str = "1.0.0",
-) -> RiskCalibrationMetrics:
-    """Evaluate the risk scoring pipeline end-to-end.
-
-    Combines classification metrics (risk level) with regression
-    metrics (risk score) and discrimination analysis.
+    n_documents: int = 0,
+) -> TopicMetrics:
+    """Evaluate topic model quality.
 
     Args:
-        true_scores: Ground-truth risk scores (0-100).
-        pred_scores: Predicted risk scores (0-100).
-        true_levels: Ground-truth risk levels (low/medium/high).
-        pred_levels: Predicted risk levels.
+        reconstruction_error: NMF reconstruction error.
+        topic_prevalences: Topic → proportion mapping.
+        model_name: Name of the model.
         model_version: Version string.
+        n_documents: Total documents in corpus.
 
     Returns:
-        RiskCalibrationMetrics.
+        TopicMetrics with reconstruction error and prevalence.
     """
-    n = len(true_scores)
-
-    # Level classification
-    level_eval = evaluate_classification(
-        true_levels, pred_levels,
-        model_name="risk_scoring_level",
+    metrics = TopicMetrics(
+        model_name=model_name,
         model_version=model_version,
-    )
-
-    # Score regression
-    score_eval = evaluate_regression(
-        [float(s) for s in true_scores],
-        [float(s) for s in pred_scores],
-        model_name="risk_scoring_score",
-        model_version=model_version,
-    )
-
-    # Discrimination: separation between high and low risk
-    high_scores = [s for s, l in zip(pred_scores, true_levels) if l == "high"]
-    low_scores = [s for s, l in zip(pred_scores, true_levels) if l == "low"]
-
-    separation = 0.0
-    if high_scores and low_scores:
-        mean_high = sum(high_scores) / len(high_scores)
-        mean_low = sum(low_scores) / len(low_scores)
-        std_high = _std(high_scores)
-        std_low = _std(low_scores)
-        pooled_std = math.sqrt(
-            (std_high ** 2 + std_low ** 2) / 2
-        ) if (std_high + std_low) > 0 else 1.0
-        separation = (mean_high - mean_low) / pooled_std
-
-    # AUC for high vs rest (binary)
-    auc = _binary_auc(
-        [1 if l == "high" else 0 for l in true_levels],
-        pred_scores,
-    )
-
-    metrics = RiskCalibrationMetrics(
-        model_version=model_version,
-        total_samples=n,
-        level_accuracy=level_eval.accuracy,
-        level_metrics=level_eval.per_class,
-        level_confusion=level_eval.confusion_matrix,
-        score_mae=score_eval.mae,
-        score_rmse=score_eval.rmse,
-        score_correlation=score_eval.pearson_correlation,
-        auc_high_vs_rest=round(auc, 4) if auc is not None else None,
-        separation_score=round(separation, 4),
+        total_documents=n_documents,
+        n_topics=len(topic_prevalences),
+        reconstruction_error=round(reconstruction_error, 4),
+        topic_prevalence=topic_prevalences,
     )
 
     logger.info(
-        f"Risk scoring eval: v{model_version}, n={n}, "
-        f"level_acc={level_eval.accuracy:.4f}, "
-        f"score_MAE={score_eval.mae:.4f}, AUC={auc}"
+        f"Topic eval: {model_name} v{model_version}, "
+        f"topics={len(topic_prevalences)}, "
+        f"recon_error={reconstruction_error:.4f}"
     )
 
     return metrics
 
 
-# ─── Model Comparison ────────────────────────────────────────────
+# ── Model Comparison ────────────────────────────────────────────
 
 
-def compare_models(
-    metrics_a: ClassificationMetrics,
-    metrics_b: ClassificationMetrics,
+def compare_clustering_models(
+    metrics_a: ClusteringMetrics,
+    metrics_b: ClusteringMetrics,
 ) -> ModelComparison:
-    """Compare two model evaluation results.
+    """Compare two clustering model evaluations.
 
-    Args:
-        metrics_a: First model evaluation (baseline).
-        metrics_b: Second model evaluation (candidate).
-
-    Returns:
-        ModelComparison with deltas and winner.
+    Higher silhouette + higher CH + lower DB = better.
     """
     deltas = {
-        "accuracy": round(metrics_b.accuracy - metrics_a.accuracy, 4),
-        "macro_f1": round(metrics_b.macro_f1 - metrics_a.macro_f1, 4),
-        "weighted_f1": round(metrics_b.weighted_f1 - metrics_a.weighted_f1, 4),
-        "macro_precision": round(
-            metrics_b.macro_precision - metrics_a.macro_precision, 4
+        "silhouette_score": round(
+            metrics_b.silhouette_score - metrics_a.silhouette_score, 4
         ),
-        "macro_recall": round(
-            metrics_b.macro_recall - metrics_a.macro_recall, 4
+        "calinski_harabasz": round(
+            metrics_b.calinski_harabasz - metrics_a.calinski_harabasz, 4
         ),
+        "davies_bouldin": round(
+            metrics_a.davies_bouldin - metrics_b.davies_bouldin, 4
+        ),  # reversed: lower is better
     }
 
-    # Winner is whichever has higher weighted F1
-    if deltas["weighted_f1"] > 0.005:
+    # Winner: primarily based on silhouette score
+    if deltas["silhouette_score"] > 0.01:
         winner = metrics_b.model_version
-    elif deltas["weighted_f1"] < -0.005:
+    elif deltas["silhouette_score"] < -0.01:
         winner = metrics_a.model_version
     else:
         winner = "tie"
 
-    comparison = ModelComparison(
+    return ModelComparison(
         model_name=metrics_a.model_name,
         version_a=metrics_a.model_version,
         version_b=metrics_b.model_version,
@@ -413,128 +365,39 @@ def compare_models(
         winner=winner,
     )
 
-    logger.info(
-        f"Model comparison: {metrics_a.model_version} vs {metrics_b.model_version}, "
-        f"winner={winner}, Δf1={deltas['weighted_f1']}"
-    )
 
-    return comparison
+# ── Helper: Elbow Method ────────────────────────────────────────
 
 
-# ─── Helper Functions ────────────────────────────────────────────
-
-
-def _pearson_correlation(x: List[float], y: List[float]) -> float:
-    """Compute Pearson correlation coefficient."""
-    n = len(x)
-    if n < 2:
-        return 0.0
-
-    mean_x = sum(x) / n
-    mean_y = sum(y) / n
-
-    cov = sum((xi - mean_x) * (yi - mean_y) for xi, yi in zip(x, y))
-    std_x = math.sqrt(sum((xi - mean_x) ** 2 for xi in x))
-    std_y = math.sqrt(sum((yi - mean_y) ** 2 for yi in y))
-
-    if std_x == 0 or std_y == 0:
-        return 0.0
-
-    return cov / (std_x * std_y)
-
-
-def _std(values: List[float]) -> float:
-    """Standard deviation."""
-    n = len(values)
-    if n < 2:
-        return 0.0
-    mean = sum(values) / n
-    variance = sum((v - mean) ** 2 for v in values) / (n - 1)
-    return math.sqrt(variance)
-
-
-def _compute_calibration(
-    y_true: List[float],
-    y_pred: List[float],
-    num_buckets: int = 10,
+def compute_elbow_scores(
+    X: np.ndarray,
+    max_k: int = 10,
 ) -> List[Dict[str, float]]:
-    """Compute calibration buckets (predicted vs actual averages)."""
-    if not y_pred:
-        return []
-
-    min_pred = min(y_pred)
-    max_pred = max(y_pred)
-    bucket_range = (max_pred - min_pred) / num_buckets if max_pred > min_pred else 1.0
-
-    buckets: List[Dict[str, float]] = []
-    for i in range(num_buckets):
-        lo = min_pred + i * bucket_range
-        hi = lo + bucket_range
-
-        pairs = [
-            (t, p)
-            for t, p in zip(y_true, y_pred)
-            if lo <= p < hi or (i == num_buckets - 1 and p == hi)
-        ]
-
-        if pairs:
-            avg_true = sum(t for t, _ in pairs) / len(pairs)
-            avg_pred = sum(p for _, p in pairs) / len(pairs)
-            buckets.append({
-                "bucket": i,
-                "range_low": round(lo, 3),
-                "range_high": round(hi, 3),
-                "avg_predicted": round(avg_pred, 3),
-                "avg_actual": round(avg_true, 3),
-                "count": len(pairs),
-            })
-
-    return buckets
-
-
-def _binary_auc(
-    y_true_binary: List[int],
-    y_scores: List[int],
-) -> Optional[float]:
-    """Compute AUC-ROC for binary classification using trapezoidal rule.
+    """Compute inertia for K from 2..max_k for the elbow method.
 
     Args:
-        y_true_binary: Binary labels (0 or 1).
-        y_scores: Continuous scores (higher = more positive).
+        X: Feature matrix.
+        max_k: Maximum number of clusters to try.
 
     Returns:
-        AUC value, or None if undefined.
+        List of {k, inertia, silhouette} dicts.
     """
-    n_pos = sum(y_true_binary)
-    n_neg = len(y_true_binary) - n_pos
+    from sklearn.cluster import KMeans
 
-    if n_pos == 0 or n_neg == 0:
-        return None
+    results = []
+    max_k = min(max_k, len(X) - 1)
 
-    # Sort by score descending
-    pairs = sorted(
-        zip(y_scores, y_true_binary), key=lambda x: -x[0]
-    )
+    for k in range(2, max_k + 1):
+        kmeans = KMeans(n_clusters=k, n_init=5, random_state=42)
+        kmeans.fit(X)
+        labels = kmeans.labels_
 
-    tp = 0
-    fp = 0
-    tpr_prev = 0.0
-    fpr_prev = 0.0
-    auc = 0.0
+        sil = silhouette_score(X, labels) if len(set(labels)) > 1 else 0.0
 
-    for score, label in pairs:
-        if label == 1:
-            tp += 1
-        else:
-            fp += 1
+        results.append({
+            "k": k,
+            "inertia": round(float(kmeans.inertia_), 4),
+            "silhouette_score": round(sil, 4),
+        })
 
-        tpr = tp / n_pos
-        fpr = fp / n_neg
-
-        # Trapezoidal rule
-        auc += (fpr - fpr_prev) * (tpr + tpr_prev) / 2
-
-        tpr_prev = tpr
-        fpr_prev = fpr
-
-    return auc
+    return results

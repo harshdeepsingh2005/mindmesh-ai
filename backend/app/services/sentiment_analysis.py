@@ -1,97 +1,84 @@
-"""MindMesh AI — Sentiment Analysis Module.
+"""MindMesh AI — Sentiment Analysis Module (Unsupervised).
 
-Analyzes text sentiment polarity (positive/negative/neutral) and
-intensity. Uses a lexicon-based approach with VADER-inspired scoring.
+Analyzes text sentiment polarity using NLTK's VADER sentiment
+analyser — a rule-based model specifically attuned to social media
+and informal text (well-suited for student journal entries).
 
-Upgradeable to transformer-based models in later phases.
+VADER is unsupervised — it requires NO training data.  It uses a
+curated lexicon with grammatical and syntactical heuristics
+(capitalisation, punctuation, intensifiers, negation, conjunctions)
+to produce a compound sentiment score.
+
+Additionally, this module maintains high-risk keyword detection for
+immediate counselor escalation — this is a safety-critical feature
+that operates independently of the ML pipeline.
 """
 
+from __future__ import annotations
+
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional
+
+import nltk
+from nltk.sentiment.vader import SentimentIntensityAnalyzer
 
 from ..logging_config import logger
 
-_FALLBACK_VERSION = "sentiment-v0.2.0-lexicon"
+# ── NLTK Data Download (one-time) ────────────────────────────────
+
+try:
+    nltk.data.find("sentiment/vader_lexicon.zip")
+except LookupError:
+    nltk.download("vader_lexicon", quiet=True)
 
 
-def _get_model_version() -> str:
-    """Get the active sentiment analysis model version from the registry."""
-    try:
-        from .model_registry import registry
-        return registry.get_active_version_string("sentiment_analysis")
-    except Exception:
-        return _FALLBACK_VERSION
+# ── Constants ────────────────────────────────────────────────────
 
-# Positive and negative word lexicons with weights
-POSITIVE_WORDS: Dict[str, float] = {
-    "good": 0.6, "great": 0.8, "excellent": 0.9, "wonderful": 0.9,
-    "amazing": 0.9, "fantastic": 0.9, "awesome": 0.8, "love": 0.8,
-    "happy": 0.8, "joy": 0.9, "excited": 0.8, "grateful": 0.8,
-    "thankful": 0.7, "blessed": 0.7, "proud": 0.7, "confident": 0.7,
-    "hopeful": 0.7, "positive": 0.6, "better": 0.6, "best": 0.8,
-    "beautiful": 0.7, "kind": 0.6, "friendly": 0.6, "helpful": 0.6,
-    "enjoy": 0.7, "fun": 0.7, "nice": 0.5, "pleasant": 0.6,
-    "comfortable": 0.6, "peaceful": 0.7, "calm": 0.6, "relaxed": 0.6,
-    "safe": 0.6, "supported": 0.7, "understood": 0.7, "accepted": 0.7,
-    "improve": 0.6, "progress": 0.6, "achieve": 0.7, "success": 0.7,
-    "smile": 0.6, "laugh": 0.7, "celebrate": 0.7, "win": 0.6,
-}
+_MODEL_VERSION = "sentiment-v3.0.0-vader"
 
-NEGATIVE_WORDS: Dict[str, float] = {
-    "bad": 0.6, "terrible": 0.9, "horrible": 0.9, "awful": 0.9,
-    "hate": 0.8, "sad": 0.8, "depressed": 1.0, "anxious": 0.8,
-    "angry": 0.8, "frustrated": 0.7, "stressed": 0.8, "worried": 0.7,
-    "scared": 0.8, "lonely": 0.8, "alone": 0.7, "hopeless": 1.0,
-    "worthless": 1.0, "helpless": 0.9, "miserable": 0.9, "hurt": 0.7,
-    "pain": 0.7, "suffer": 0.8, "cry": 0.7, "crying": 0.8,
-    "tears": 0.7, "broken": 0.8, "lost": 0.6, "confused": 0.6,
-    "overwhelmed": 0.8, "exhausted": 0.7, "tired": 0.5, "sick": 0.6,
-    "ugly": 0.7, "stupid": 0.7, "dumb": 0.6, "fail": 0.7,
-    "failure": 0.8, "worst": 0.9, "worse": 0.7, "trouble": 0.6,
-    "problem": 0.5, "difficult": 0.5, "hard": 0.4, "struggle": 0.6,
-    "bully": 0.8, "bullied": 0.9, "abuse": 0.9, "neglect": 0.8,
-    "panic": 0.9, "fear": 0.8, "nightmare": 0.8, "death": 0.9,
-    "die": 0.9, "kill": 1.0, "suicide": 1.0, "selfharm": 1.0,
-}
-
-# High-risk keywords that require immediate counselor escalation
+# High-risk keywords that MUST trigger immediate counselor escalation.
+# This is a safety feature — NOT part of the ML pipeline.
 HIGH_RISK_KEYWORDS = {
     "suicide", "suicidal", "kill myself", "end my life", "want to die",
     "selfharm", "self-harm", "self harm", "cutting", "overdose",
     "no reason to live", "better off dead", "can't go on",
+    "don't want to be here", "wish i was dead", "hurt myself",
 }
 
-NEGATION_WORDS = {
-    "not", "no", "never", "neither", "nobody", "nothing",
-    "don't", "doesn't", "didn't", "won't", "wouldn't",
-    "shouldn't", "couldn't", "can't", "cannot", "hardly",
-    "barely", "scarcely", "isn't", "aren't", "wasn't", "weren't",
-}
 
-INTENSIFIERS = {
-    "very": 1.3, "really": 1.3, "extremely": 1.5, "so": 1.2,
-    "incredibly": 1.4, "absolutely": 1.4, "totally": 1.3,
-    "completely": 1.4, "deeply": 1.3, "severely": 1.4,
-}
+# ── Data Classes ─────────────────────────────────────────────────
 
 
 @dataclass
 class SentimentResult:
     """Result of sentiment analysis."""
-    sentiment_label: str  # positive, negative, neutral
-    sentiment_score: float  # -1.0 (most negative) to 1.0 (most positive)
-    positive_score: float
-    negative_score: float
+    sentiment_label: str        # positive, negative, neutral
+    sentiment_score: float      # compound score: -1.0 to 1.0
+    positive_score: float       # positive proportion (0-1)
+    negative_score: float       # negative proportion (0-1)
+    neutral_score: float        # neutral proportion (0-1)
     high_risk_flag: bool
     high_risk_keywords_found: List[str]
     model_version: str = ""
+    vader_raw: Dict[str, float] = field(default_factory=dict)
 
 
-def _tokenize(text: str) -> List[str]:
-    """Tokenize text into lowercase words."""
-    text = text.lower()
-    return re.sub(r"[^a-z\s']", " ", text).split()
+# ── VADER Engine ─────────────────────────────────────────────────
+
+_vader: Optional[SentimentIntensityAnalyzer] = None
+
+
+def _get_vader() -> SentimentIntensityAnalyzer:
+    """Get or initialise the VADER analyser (lazy singleton)."""
+    global _vader
+    if _vader is None:
+        _vader = SentimentIntensityAnalyzer()
+        logger.info("VADER SentimentIntensityAnalyzer initialised")
+    return _vader
+
+
+# ── High-Risk Detection ──────────────────────────────────────────
 
 
 def _check_high_risk(text: str) -> List[str]:
@@ -99,6 +86,12 @@ def _check_high_risk(text: str) -> List[str]:
 
     These indicate potential self-harm or suicidal ideation
     and MUST be escalated to a human counselor immediately.
+
+    Args:
+        text: Raw text input.
+
+    Returns:
+        List of matched high-risk keywords.
     """
     text_lower = text.lower()
     found = []
@@ -108,11 +101,22 @@ def _check_high_risk(text: str) -> List[str]:
     return found
 
 
-def analyze_sentiment(text: Optional[str]) -> SentimentResult:
-    """Analyze sentiment polarity and intensity of text.
+# ── Public API ───────────────────────────────────────────────────
 
-    Scores text on a scale from -1.0 (most negative) to 1.0 (most positive).
-    Also flags high-risk content for counselor escalation.
+
+def analyze_sentiment(text: Optional[str]) -> SentimentResult:
+    """Analyze sentiment polarity and intensity of text using VADER.
+
+    VADER produces four scores:
+      - pos:      proportion of positive sentiment
+      - neg:      proportion of negative sentiment
+      - neu:      proportion of neutral sentiment
+      - compound: normalised composite (-1 to 1)
+
+    Classification thresholds (standard VADER):
+      compound >=  0.05  → positive
+      compound <= -0.05  → negative
+      otherwise          → neutral
 
     Args:
         text: Input text to analyze.
@@ -120,20 +124,19 @@ def analyze_sentiment(text: Optional[str]) -> SentimentResult:
     Returns:
         SentimentResult with polarity, scores, and risk flags.
     """
-    version = _get_model_version()
-
     if not text or not text.strip():
         return SentimentResult(
             sentiment_label="neutral",
             sentiment_score=0.0,
             positive_score=0.0,
             negative_score=0.0,
+            neutral_score=1.0,
             high_risk_flag=False,
             high_risk_keywords_found=[],
-            model_version=version,
+            model_version=_MODEL_VERSION,
         )
 
-    # Check for high-risk content first
+    # High-risk check is independent of sentiment model
     high_risk_found = _check_high_risk(text)
     if high_risk_found:
         logger.warning(
@@ -141,85 +144,44 @@ def analyze_sentiment(text: Optional[str]) -> SentimentResult:
             "Flagging for counselor escalation."
         )
 
-    tokens = _tokenize(text)
-    if not tokens:
-        return SentimentResult(
-            sentiment_label="neutral",
-            sentiment_score=0.0,
-            positive_score=0.0,
-            negative_score=0.0,
-            high_risk_flag=bool(high_risk_found),
-            high_risk_keywords_found=high_risk_found,
-            model_version=version,
-        )
+    # VADER sentiment analysis
+    vader = _get_vader()
+    scores = vader.polarity_scores(text)
 
-    pos_score = 0.0
-    neg_score = 0.0
+    compound = scores["compound"]
+    pos = scores["pos"]
+    neg = scores["neg"]
+    neu = scores["neu"]
 
-    for i, token in enumerate(tokens):
-        # Check for intensifier
-        intensifier = 1.0
-        if i > 0 and tokens[i - 1] in INTENSIFIERS:
-            intensifier = INTENSIFIERS[tokens[i - 1]]
-
-        # Check for negation
-        is_negated = False
-        start = max(0, i - 3)
-        for j in range(start, i):
-            if tokens[j] in NEGATION_WORDS:
-                is_negated = True
-                break
-
-        if token in POSITIVE_WORDS:
-            weight = POSITIVE_WORDS[token] * intensifier
-            if is_negated:
-                neg_score += weight * 0.5
-            else:
-                pos_score += weight
-
-        if token in NEGATIVE_WORDS:
-            weight = NEGATIVE_WORDS[token] * intensifier
-            if is_negated:
-                pos_score += weight * 0.3
-            else:
-                neg_score += weight
-
-    # Normalize by token count
-    token_count = max(len(tokens), 1)
-    pos_normalized = min(1.0, pos_score / (token_count * 0.3))
-    neg_normalized = min(1.0, neg_score / (token_count * 0.3))
-
-    # Calculate composite score (-1 to 1)
-    composite = pos_normalized - neg_normalized
-    composite = max(-1.0, min(1.0, composite))
-
-    # Determine label
-    if composite > 0.1:
+    # Classify
+    if compound >= 0.05:
         label = "positive"
-    elif composite < -0.1:
+    elif compound <= -0.05:
         label = "negative"
     else:
         label = "neutral"
 
-    # If high-risk content found, force negative bias
+    # Override on high-risk content — force negative
     if high_risk_found:
         label = "negative"
-        composite = min(composite, -0.5)
-        neg_normalized = max(neg_normalized, 0.8)
+        compound = min(compound, -0.5)
+        neg = max(neg, 0.8)
 
     result = SentimentResult(
         sentiment_label=label,
-        sentiment_score=round(composite, 4),
-        positive_score=round(pos_normalized, 4),
-        negative_score=round(neg_normalized, 4),
+        sentiment_score=round(compound, 4),
+        positive_score=round(pos, 4),
+        negative_score=round(neg, 4),
+        neutral_score=round(neu, 4),
         high_risk_flag=bool(high_risk_found),
         high_risk_keywords_found=high_risk_found,
-        model_version=version,
+        model_version=_MODEL_VERSION,
+        vader_raw=scores,
     )
 
     logger.debug(
-        f"Sentiment: {label} (score={composite:.4f}), "
-        f"pos={pos_normalized:.4f}, neg={neg_normalized:.4f}, "
+        f"Sentiment: {label} (compound={compound:.4f}), "
+        f"pos={pos:.4f}, neg={neg:.4f}, neu={neu:.4f}, "
         f"high_risk={result.high_risk_flag}"
     )
 

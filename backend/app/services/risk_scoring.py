@@ -1,33 +1,33 @@
-"""MindMesh AI — Risk Prediction Engine.
+"""MindMesh AI — Risk Prediction Engine (Unsupervised).
 
-Multi-factor composite risk scoring system.  Each student is scored on a 0-100
-scale by weighting seven behavioral / emotional factors derived from recent
-records.  Thresholds map the composite score to a human-readable risk level.
+Scores student risk using Isolation Forest anomaly detection
+combined with sentiment trend analysis.  Unlike the previous
+version with hardcoded factor weights, this engine LEARNS what
+constitutes "abnormal" behaviour from the data itself.
+
+Risk pipeline:
+  1. Build a BehavioralFeatureVector from recent records
+  2. Run Isolation Forest anomaly detection
+  3. Combine anomaly score with VADER sentiment signals
+  4. Map to risk level (low / medium / high)
+  5. Persist RiskScore + auto-generate Alert on high risk
 
 Risk Levels:
     LOW      — 0-39   (routine monitoring)
     MEDIUM   — 40-69  (increased attention)
     HIGH     — 70-100 (immediate intervention recommended)
-
-Factor Weights (must sum to 1.0):
-    sentiment_score        0.20
-    emotion_intensity      0.20
-    high_risk_keywords     0.15
-    behavioral_frequency   0.15
-    trend_direction        0.15
-    mood_variability       0.10
-    journal_sentiment      0.05
-
-An alert is automatically created when the composite score ≥ 70.
 """
 
 from __future__ import annotations
 
 import uuid
+import math
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
+import numpy as np
 from sqlalchemy import select, func, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -40,7 +40,12 @@ from ..logging_config import logger
 
 from .sentiment_analysis import analyze_sentiment
 from .emotion_detection import detect_emotion
-from .trend_analysis import analyze_trends
+from .anomaly_detection import (
+    AnomalyDetectionEngine,
+    BehavioralFeatureVector,
+    AnomalyResult,
+    get_anomaly_engine,
+)
 
 # ── Constants ────────────────────────────────────────────────────
 
@@ -50,53 +55,54 @@ RISK_THRESHOLDS = {
     "high": (70, 100),
 }
 
-FACTOR_WEIGHTS: Dict[str, float] = {
-    "sentiment_score": 0.20,
-    "emotion_intensity": 0.20,
-    "high_risk_keywords": 0.15,
-    "behavioral_frequency": 0.15,
-    "trend_direction": 0.15,
-    "mood_variability": 0.10,
-    "journal_sentiment": 0.05,
-}
+LOOKBACK_DAYS = 30  # sliding window for feature computation
 
-LOOKBACK_DAYS = 30  # sliding window for factor computation
+FACTOR_WEIGHTS = {
+    "anomaly_score": 0.30,
+    "sentiment_score": 0.20,
+    "emotion_intensity": 0.15,
+    "high_risk_keywords": 0.15,
+    "mood_variability": 0.10,
+    "behavioral_frequency": 0.05,
+    "trend_direction": 0.05,
+}
 
 
 # ── Data Classes ─────────────────────────────────────────────────
 
+
 @dataclass
 class RiskFactors:
     """Individual factor scores (each 0-100)."""
-
-    sentiment_score: float = 0.0
-    emotion_intensity: float = 0.0
-    high_risk_keywords: float = 0.0
-    behavioral_frequency: float = 0.0
-    trend_direction: float = 0.0
-    mood_variability: float = 0.0
-    journal_sentiment: float = 0.0
+    anomaly_score: float = 0.0         # Isolation Forest output
+    sentiment_score: float = 0.0       # avg negative sentiment
+    emotion_intensity: float = 0.0     # proportion of distress
+    behavioral_frequency: float = 0.0  # activity level
+    mood_variability: float = 0.0      # mood stability
+    high_risk_keywords: float = 0.0    # flagged content
+    trend_direction: float = 0.0       # deteriorating trend
 
     def to_dict(self) -> Dict[str, float]:
         return {
+            "anomaly_score": round(self.anomaly_score, 2),
             "sentiment_score": round(self.sentiment_score, 2),
             "emotion_intensity": round(self.emotion_intensity, 2),
-            "high_risk_keywords": round(self.high_risk_keywords, 2),
             "behavioral_frequency": round(self.behavioral_frequency, 2),
-            "trend_direction": round(self.trend_direction, 2),
             "mood_variability": round(self.mood_variability, 2),
-            "journal_sentiment": round(self.journal_sentiment, 2),
+            "high_risk_keywords": round(self.high_risk_keywords, 2),
+            "trend_direction": round(self.trend_direction, 2),
         }
 
 
 @dataclass
 class RiskAssessment:
-    """Complete assessment result returned to callers."""
-
+    """Complete risk assessment result."""
     student_id: str
     composite_score: int
     risk_level: str
     factors: RiskFactors
+    anomaly_result: Optional[AnomalyResult] = None
+    contributing_features: List[Tuple[str, float]] = field(default_factory=list)
     assessed_at: datetime = field(
         default_factory=lambda: datetime.now(timezone.utc)
     )
@@ -106,36 +112,60 @@ class RiskAssessment:
         return self.risk_level == "high"
 
 
-# ── Helper Utilities ─────────────────────────────────────────────
+# ── Helpers ──────────────────────────────────────────────────────
 
 def _clamp(value: float, lo: float = 0.0, hi: float = 100.0) -> float:
     return max(lo, min(hi, value))
 
 
+def get_dynamic_thresholds() -> Dict[str, Tuple[int, int]]:
+    """Adjust risk thresholds dynamically based on the academic calendar.
+    
+    During high-stress periods (like midterms in March/October, 
+    finals in May/December), we lower the threshold for 'high' risk 
+    to be more sensitive and catch at-risk students earlier.
+    """
+    now = datetime.now(timezone.utc)
+    # E.g. March (Midterms), May (Finals), October (Midterms), December (Finals)
+    is_high_stress_period = now.month in [3, 5, 10, 12]
+    
+    if is_high_stress_period:
+        return {
+            "low": (0, 30),
+            "medium": (31, 59),
+            "high": (60, 100),   # High risk triggers at 60 instead of 70
+        }
+    
+    return {
+        "low": (0, 39),
+        "medium": (40, 69),
+        "high": (70, 100),       # Standard threshold
+    }
+
+
 def _risk_level_from_score(score: int) -> str:
-    for level, (lo, hi) in RISK_THRESHOLDS.items():
+    thresholds = get_dynamic_thresholds()
+    for level, (lo, hi) in thresholds.items():
         if lo <= score <= hi:
             return level
-    return "high"  # fallback
+    return "high"
 
 
-# ── Factor Computation ───────────────────────────────────────────
+# ── Feature Vector Construction ──────────────────────────────────
 
-async def compute_risk_factors(
+async def build_feature_vector(
     db: AsyncSession,
     student_id: str,
-    *,
     lookback_days: int = LOOKBACK_DAYS,
-) -> RiskFactors:
-    """Compute all seven risk factors from the student's recent data.
+) -> BehavioralFeatureVector:
+    """Build a behavioural feature vector from database records.
 
-    Each factor is normalised to a 0-100 scale where **higher = more risk**.
+    Aggregates sentiment, emotion, activity, and mood data over
+    the lookback window into a single feature vector for ML models.
     """
-
     cutoff = datetime.now(timezone.utc) - timedelta(days=lookback_days)
-    factors = RiskFactors()
 
-    # ── 1. Recent behavioral records ─────────────────────────────
+    # Fetch recent records
     stmt = (
         select(BehavioralRecord)
         .where(
@@ -147,109 +177,164 @@ async def compute_risk_factors(
     result = await db.execute(stmt)
     records: List[BehavioralRecord] = list(result.scalars().all())
 
+    fv = BehavioralFeatureVector(student_id=student_id)
+
     if not records:
-        return factors  # all zeros — no data
+        return fv
 
-    # ── 2. Emotion analyses for those records ────────────────────
-    record_ids = [r.id for r in records]
-    stmt_ea = (
-        select(EmotionAnalysis)
-        .where(EmotionAnalysis.record_id.in_(record_ids))
-    )
-    ea_result = await db.execute(stmt_ea)
-    analyses: List[EmotionAnalysis] = list(ea_result.scalars().all())
+    # ── Sentiment Features ───────────────────────────────────
+    sentiment_scores = []
+    negative_count = 0
+    high_risk_count = 0
 
-    # ── Factor: sentiment_score ──────────────────────────────────
-    # Average negative sentiment across records (inverted: more negative → higher risk)
-    if records:
-        sentiment_scores = []
-        for r in records:
-            text = r.text_input or r.mood_rating or ""
-            if text:
-                sr = analyze_sentiment(str(text))
-                sentiment_scores.append(sr.negative_score * 100)
-        if sentiment_scores:
-            factors.sentiment_score = _clamp(
-                sum(sentiment_scores) / len(sentiment_scores)
-            )
-
-    # ── Factor: emotion_intensity ────────────────────────────────
-    # High confidence in negative emotions → higher risk
-    negative_emotions = {"sadness", "anger", "fear"}
-    if analyses:
-        neg_confs = [
-            a.confidence_score * 100
-            for a in analyses
-            if a.predicted_emotion in negative_emotions
-        ]
-        if neg_confs:
-            factors.emotion_intensity = _clamp(
-                sum(neg_confs) / len(neg_confs)
-            )
-
-    # ── Factor: high_risk_keywords ───────────────────────────────
-    # Proportion of records flagged for high-risk keywords
-    flagged = 0
     for r in records:
         text = r.text_input or ""
         if text:
             sr = analyze_sentiment(text)
+            sentiment_scores.append(sr.sentiment_score)
+            if sr.sentiment_label == "negative":
+                negative_count += 1
             if sr.high_risk_flag:
-                flagged += 1
-    if records:
-        factors.high_risk_keywords = _clamp((flagged / len(records)) * 100)
+                high_risk_count += 1
 
-    # ── Factor: behavioral_frequency ─────────────────────────────
-    # More records in a shorter window → higher concern  (cap at 30 records)
-    factors.behavioral_frequency = _clamp(
-        (len(records) / 30) * 100
-    )
+    if sentiment_scores:
+        fv.avg_sentiment = sum(sentiment_scores) / len(sentiment_scores)
+        if len(sentiment_scores) > 1:
+            mean_s = fv.avg_sentiment
+            fv.sentiment_std = (
+                sum((s - mean_s) ** 2 for s in sentiment_scores)
+                / (len(sentiment_scores) - 1)
+            ) ** 0.5
 
-    # ── Factor: trend_direction ──────────────────────────────────
-    # Worsening trend → higher risk  (negative slope in mood trend)
-    if len(records) >= 3:
-        trend = await analyze_trends(db, student_id, days=lookback_days)
-        if trend and trend.get("mood_trend"):
-            slope = trend["mood_trend"].get("slope", 0)
-            # negative slope means deteriorating, scale ×20 and clamp
-            factors.trend_direction = _clamp(max(0, -slope * 20) * 100 / 5)
+    fv.negative_ratio = negative_count / max(len(records), 1)
+    fv.high_risk_flags = high_risk_count
 
-    # ── Factor: mood_variability ─────────────────────────────────
-    mood_ratings = [
-        int(r.mood_rating) for r in records
-        if r.mood_rating and str(r.mood_rating).isdigit()
-    ]
-    if len(mood_ratings) >= 2:
-        mean_m = sum(mood_ratings) / len(mood_ratings)
-        variance = sum((m - mean_m) ** 2 for m in mood_ratings) / len(mood_ratings)
-        std_dev = variance ** 0.5
-        # Normalise: std_dev of 2 on a 1-5 scale → 100
-        factors.mood_variability = _clamp((std_dev / 2) * 100)
-
-    # ── Factor: journal_sentiment ────────────────────────────────
-    journal_negs: list[float] = []
+    # ── Emotion Features ─────────────────────────────────────
+    emotion_results = []
     for r in records:
-        if r.record_type == "journal" and r.text_input:
-            sr = analyze_sentiment(r.text_input)
-            journal_negs.append(sr.negative_score * 100)
-    if journal_negs:
-        factors.journal_sentiment = _clamp(
-            sum(journal_negs) / len(journal_negs)
+        text = r.text_input or ""
+        if text:
+            er = detect_emotion(text)
+            emotion_results.append(er)
+
+    if emotion_results:
+        # Dominant cluster
+        cluster_counts = Counter(er.predicted_cluster for er in emotion_results)
+        fv.dominant_cluster = cluster_counts.most_common(1)[0][0]
+
+        # Entropy of cluster distribution
+        total = len(emotion_results)
+        probs = [c / total for c in cluster_counts.values()]
+        fv.emotion_entropy = -sum(p * math.log2(p) for p in probs if p > 0)
+
+        # Distress ratio (clusters with negative labels)
+        distress_labels = {"distress", "anxiety", "anger"}
+        distress_count = sum(
+            1 for er in emotion_results
+            if any(dl in er.cluster_label.lower() for dl in distress_labels)
         )
+        fv.distress_ratio = distress_count / total
 
-    return factors
+    # ── Activity Features ────────────────────────────────────
+    weeks = max(lookback_days / 7, 1)
+    fv.entries_per_week = len(records) / weeks
+
+    journal_count = sum(1 for r in records if r.activity_type == "journal")
+    fv.journal_ratio = journal_count / max(len(records), 1)
+
+    if records:
+        latest = max(r.timestamp for r in records)
+        fv.days_since_last_entry = (
+            datetime.now(timezone.utc) - latest
+        ).total_seconds() / 86400
+
+    # ── Mood Features (derived from emotion_score) ─────────
+    mood_ratings = [
+        float(r.emotion_score) for r in records
+        if r.emotion_score is not None
+    ]
+    if mood_ratings:
+        fv.avg_mood = sum(mood_ratings) / len(mood_ratings)
+        if len(mood_ratings) > 1:
+            mean_m = fv.avg_mood
+            fv.mood_std = (
+                sum((m - mean_m) ** 2 for m in mood_ratings)
+                / (len(mood_ratings) - 1)
+            ) ** 0.5
+
+    return fv
 
 
-# ── Composite Scoring ────────────────────────────────────────────
+# ── Risk Scoring ─────────────────────────────────────────────────
 
-def calculate_composite_score(factors: RiskFactors) -> int:
-    """Weighted sum of individual factor scores → 0-100 int."""
+async def compute_risk_factors(
+    db: AsyncSession,
+    student_id: str,
+    lookback_days: int = LOOKBACK_DAYS,
+) -> Tuple[RiskFactors, BehavioralFeatureVector, Optional[AnomalyResult]]:
+    """Compute risk factors using anomaly detection + sentiment signals.
+
+    Returns:
+        Tuple of (RiskFactors, BehavioralFeatureVector, AnomalyResult).
+    """
+    fv = await build_feature_vector(db, student_id, lookback_days)
+    factors = RiskFactors()
+
+    # Run anomaly detection
+    anomaly_engine = get_anomaly_engine()
+    anomaly_result = anomaly_engine.predict(fv)
+
+    # Map anomaly score to 0-100 (more anomalous = higher)
+    # Isolation Forest scores: ~[-0.5, 0.5], negative = more anomalous
+    anomaly_normalized = _clamp((0.5 - anomaly_result.anomaly_score) * 100)
+    factors.anomaly_score = anomaly_normalized
+
+    # Sentiment-based risk (negative sentiment = higher risk)
+    factors.sentiment_score = _clamp((1 - (fv.avg_sentiment + 1) / 2) * 100)
+
+    # Emotion intensity (distress ratio)
+    factors.emotion_intensity = _clamp(fv.distress_ratio * 100)
+
+    # Activity frequency (both extremes are concerning)
+    if fv.entries_per_week < 1:
+        factors.behavioral_frequency = _clamp((1 - fv.entries_per_week) * 50)
+    elif fv.entries_per_week > 10:
+        factors.behavioral_frequency = _clamp((fv.entries_per_week - 10) * 10)
+    else:
+        factors.behavioral_frequency = 0.0
+
+    # Mood variability
+    factors.mood_variability = _clamp(fv.mood_std * 40)
+
+    # High-risk keyword flags (immediate escalation)
+    factors.high_risk_keywords = _clamp(fv.high_risk_flags * 50)
+
+    return factors, fv, anomaly_result
+
+
+def calculate_composite_score(
+    factors: RiskFactors,
+    anomaly_result: Optional[AnomalyResult] = None,
+) -> int:
+    """Calculate composite risk score.
+
+    Anomaly detection is the PRIMARY signal (40% weight).
+    Sentiment and emotion are SECONDARY signals.
+    High-risk keywords override everything.
+    """
     fd = factors.to_dict()
-    weighted = sum(fd[k] * FACTOR_WEIGHTS[k] for k in FACTOR_WEIGHTS)
+
+    # Weights: anomaly detection is the primary unsupervised signal
+    weighted = sum(fd.get(k, 0) * w for k, w in FACTOR_WEIGHTS.items())
+
+    # High-risk keyword override: floor at 70
+    if fd.get("high_risk_keywords", 0) > 0:
+        weighted = max(weighted, 70)
+
     return int(_clamp(weighted))
 
 
-# ── Main Assessment Entry Point ──────────────────────────────────
+# ── Main API ─────────────────────────────────────────────────────
 
 async def assess_student_risk(
     db: AsyncSession,
@@ -260,29 +345,35 @@ async def assess_student_risk(
 ) -> RiskAssessment:
     """Run a full risk assessment for one student.
 
-    1. Compute factors
-    2. Calculate composite score
-    3. Persist a RiskScore row
-    4. Create an Alert if high-risk
-
-    Returns:
-        A RiskAssessment dataclass with all details.
+    1. Build behavioural feature vector from recent records
+    2. Run Isolation Forest anomaly detection
+    3. Compute risk factors
+    4. Calculate composite score
+    5. Persist RiskScore row
+    6. Create Alert if high-risk
     """
-
-    factors = await compute_risk_factors(
+    factors, fv, anomaly_result = await compute_risk_factors(
         db, student_id, lookback_days=lookback_days
     )
-    composite = calculate_composite_score(factors)
+    composite = calculate_composite_score(factors, anomaly_result)
     level = _risk_level_from_score(composite)
+
+    contributing = (
+        anomaly_result.contributing_features
+        if anomaly_result
+        else []
+    )
 
     assessment = RiskAssessment(
         student_id=student_id,
         composite_score=composite,
         risk_level=level,
         factors=factors,
+        anomaly_result=anomaly_result,
+        contributing_features=contributing,
     )
 
-    # ── Persist RiskScore ────────────────────────────────────────
+    # ── Persist RiskScore ────────────────────────────────────
     risk_row = RiskScore(
         id=str(uuid.uuid4()),
         student_id=student_id,
@@ -292,8 +383,11 @@ async def assess_student_risk(
     )
     db.add(risk_row)
 
-    # ── Auto-alert on HIGH risk ──────────────────────────────────
+    # ── Auto-alert on HIGH risk ──────────────────────────────
     if assessment.is_high_risk and create_alert_on_high:
+        contributing_str = ", ".join(
+            f"{name}: {score:.2f}" for name, score in contributing[:3]
+        )
         alert = Alert(
             id=str(uuid.uuid4()),
             student_id=student_id,
@@ -301,21 +395,25 @@ async def assess_student_risk(
             alert_type="high_risk",
             message=(
                 f"Student {student_id} scored {composite}/100 "
-                f"(level: {level}). Immediate attention recommended."
+                f"(level: {level}). "
+                f"Key factors: {contributing_str}. "
+                f"Immediate attention recommended."
             ),
         )
         db.add(alert)
         logger.warning(
             f"HIGH RISK ALERT — student={student_id}, "
-            f"score={composite}, level={level}"
+            f"score={composite}, level={level}, "
+            f"anomaly_score={factors.anomaly_score:.2f}"
         )
 
     await db.commit()
     await db.refresh(risk_row)
 
     logger.info(
-        f"Risk assessment complete: student={student_id}, "
-        f"score={composite}, level={level}"
+        f"Risk assessment: student={student_id}, "
+        f"score={composite}, level={level}, "
+        f"anomaly={factors.anomaly_score:.2f}"
     )
 
     return assessment
@@ -344,7 +442,7 @@ async def get_latest_risk_score(
     db: AsyncSession,
     student_id: str,
 ) -> Optional[RiskScore]:
-    """Return the single most-recent risk score for a student."""
+    """Return the single most-recent risk score."""
     stmt = (
         select(RiskScore)
         .where(RiskScore.student_id == student_id)
@@ -361,7 +459,7 @@ async def batch_assess_students(
     *,
     lookback_days: int = LOOKBACK_DAYS,
 ) -> List[RiskAssessment]:
-    """Run risk assessments for multiple students in sequence."""
+    """Run risk assessments for multiple students."""
     assessments: List[RiskAssessment] = []
     for sid in student_ids:
         try:

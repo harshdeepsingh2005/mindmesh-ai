@@ -1,13 +1,15 @@
-"""MindMesh AI — Model Registry & Versioning.
+"""MindMesh AI — Model Registry & Versioning (Unsupervised).
 
-Manages model metadata, version tracking, and deployment state.
-Each model (emotion detection, sentiment analysis, risk scoring)
-has a registry entry with:
-  • Version string (semver)
-  • Configuration / hyperparameters
-  • Evaluation metrics from the last benchmark
-  • Status (active, candidate, retired)
-  • Timestamps
+Manages model metadata, version tracking, and deployment state
+for all unsupervised ML models:
+
+  • text_embeddings     — TF-IDF vectoriser
+  • emotion_detection   — K-Means emotion clustering
+  • sentiment_analysis  — VADER sentiment analyser
+  • anomaly_detection   — Isolation Forest
+  • student_clustering  — Gaussian Mixture Model
+  • topic_discovery     — NMF topic modelling
+  • risk_scoring        — Composite (anomaly + sentiment)
 
 The registry is stored in-memory for the prototype but designed
 to be backed by a database table in production.
@@ -31,7 +33,7 @@ class ModelVersion:
     version: str
     status: str = "candidate"  # candidate | active | retired
     config: Dict[str, Any] = field(default_factory=dict)
-    metrics: Dict[str, float] = field(default_factory=dict)
+    metrics: Dict[str, Any] = field(default_factory=dict)
     description: str = ""
     created_at: datetime = field(
         default_factory=lambda: datetime.now(timezone.utc)
@@ -67,85 +69,146 @@ class ModelRegistry:
         self._initialise_defaults()
 
     def _initialise_defaults(self) -> None:
-        """Register the built-in model versions."""
-        # Emotion detection
+        """Register the built-in unsupervised model versions."""
+
+        # Text Embeddings (TF-IDF)
         self.register(
             ModelVersion(
-                model_name="emotion_detection",
-                version="1.0.0",
+                model_name="text_embeddings",
+                version="3.0.0",
                 status="active",
                 config={
-                    "type": "keyword_rule_based",
-                    "emotions": ["happy", "sad", "anxious", "angry", "neutral"],
-                    "keyword_lists": 5,
-                    "fallback": "neutral",
+                    "type": "tfidf",
+                    "max_features": 5000,
+                    "ngram_range": [1, 2],
+                    "sublinear_tf": True,
                 },
-                metrics={
-                    "accuracy": 0.62,
-                    "macro_f1": 0.58,
-                    "weighted_f1": 0.60,
-                },
-                description="Rule-based keyword emotion classifier v1",
+                metrics={"vocabulary_size": 0},
+                description="TF-IDF text embedding engine v3 (unfitted, awaiting data)",
                 activated_at=datetime.now(timezone.utc),
             )
         )
 
+        # Emotion Detection (K-Means Clustering)
         self.register(
             ModelVersion(
                 model_name="emotion_detection",
-                version="2.0.0",
-                status="candidate",
+                version="3.0.0",
+                status="active",
                 config={
-                    "type": "tfidf_svm",
-                    "max_features": 5000,
-                    "kernel": "linear",
-                    "emotions": ["happy", "sad", "anxious", "angry", "neutral"],
+                    "type": "kmeans_clustering",
+                    "n_clusters": 5,
+                    "init": "k-means++",
                 },
-                metrics={},
-                description="TF-IDF + SVM emotion classifier (candidate)",
+                metrics={
+                    "silhouette_score": 0.0,
+                    "n_clusters": 5,
+                },
+                description="K-Means emotion cluster discovery v3 (unfitted, awaiting data)",
+                activated_at=datetime.now(timezone.utc),
             )
         )
 
-        # Sentiment analysis
+        # Sentiment Analysis (VADER)
         self.register(
             ModelVersion(
                 model_name="sentiment_analysis",
-                version="1.0.0",
+                version="3.0.0",
                 status="active",
                 config={
-                    "type": "lexicon_based",
-                    "positive_words": 45,
-                    "negative_words": 55,
-                    "high_risk_keywords": 20,
+                    "type": "vader",
+                    "library": "nltk",
+                    "compound_threshold_pos": 0.05,
+                    "compound_threshold_neg": -0.05,
                 },
                 metrics={
-                    "mae": 0.18,
-                    "pearson_correlation": 0.71,
+                    "type": "rule_based_unsupervised",
+                    "description": "VADER requires no training",
                 },
-                description="Lexicon-based sentiment analyser v1",
+                description="VADER sentiment analyser v3 (no training required)",
                 activated_at=datetime.now(timezone.utc),
             )
         )
 
-        # Risk scoring
+        # Anomaly Detection (Isolation Forest)
         self.register(
             ModelVersion(
-                model_name="risk_scoring",
+                model_name="anomaly_detection",
                 version="1.0.0",
                 status="active",
                 config={
-                    "type": "weighted_factor_composite",
-                    "num_factors": 7,
+                    "type": "isolation_forest",
+                    "contamination": 0.1,
+                    "n_estimators": 100,
+                },
+                metrics={
+                    "anomaly_rate": 0.0,
+                },
+                description="Isolation Forest anomaly detection v1 (unfitted, awaiting data)",
+                activated_at=datetime.now(timezone.utc),
+            )
+        )
+
+        # Student Clustering (GMM)
+        self.register(
+            ModelVersion(
+                model_name="student_clustering",
+                version="1.0.0",
+                status="active",
+                config={
+                    "type": "gmm",
+                    "covariance_type": "full",
+                    "auto_select_k": True,
+                },
+                metrics={
+                    "silhouette_score": 0.0,
+                    "n_clusters": 0,
+                },
+                description="GMM student clustering v1 (unfitted, awaiting data)",
+                activated_at=datetime.now(timezone.utc),
+            )
+        )
+
+        # Topic Discovery (NMF)
+        self.register(
+            ModelVersion(
+                model_name="topic_discovery",
+                version="1.0.0",
+                status="active",
+                config={
+                    "type": "nmf",
+                    "n_topics": 8,
+                    "init": "nndsvd",
+                },
+                metrics={
+                    "reconstruction_error": 0.0,
+                    "n_topics": 0,
+                },
+                description="NMF topic discovery v1 (unfitted, awaiting data)",
+                activated_at=datetime.now(timezone.utc),
+            )
+        )
+
+        # Risk Scoring (Composite: Anomaly + Sentiment)
+        self.register(
+            ModelVersion(
+                model_name="risk_scoring",
+                version="2.0.0",
+                status="active",
+                config={
+                    "type": "anomaly_composite",
+                    "primary_signal": "isolation_forest",
+                    "secondary_signals": ["vader_sentiment", "emotion_clusters"],
                     "threshold_low": 40,
                     "threshold_high": 70,
                     "lookback_days": 30,
                 },
                 metrics={
-                    "level_accuracy": 0.75,
-                    "score_mae": 8.5,
-                    "separation_score": 2.1,
+                    "type": "unsupervised_composite",
+                    "anomaly_weight": 0.30,
+                    "sentiment_weight": 0.20,
                 },
-                description="7-factor weighted composite risk scorer v1",
+                description="Anomaly-based composite risk scorer v2",
                 activated_at=datetime.now(timezone.utc),
             )
         )
@@ -159,10 +222,7 @@ class ModelRegistry:
     # ─── Registration ────────────────────────────────────────
 
     def register(self, model: ModelVersion) -> ModelVersion:
-        """Register a new model version.
-
-        If the version already exists, it is overwritten.
-        """
+        """Register a new model version."""
         if model.model_name not in self._registry:
             self._registry[model.model_name] = {}
 
@@ -201,7 +261,6 @@ class ModelRegistry:
         self._active[model_name] = version
 
         logger.info(f"Model activated: {model_name} v{version}")
-
         return model
 
     def retire(self, model_name: str, version: str) -> ModelVersion:
@@ -258,7 +317,7 @@ class ModelRegistry:
         self,
         model_name: str,
         version: str,
-        metrics: Dict[str, float],
+        metrics: Dict[str, Any],
     ) -> ModelVersion:
         """Update stored metrics for a model version."""
         model = self.get(model_name, version)

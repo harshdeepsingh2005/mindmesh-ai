@@ -18,7 +18,7 @@ from .routes import student, counselor, analytics, auth, users, analysis, alerts
 async def lifespan(app: FastAPI):
     """Application startup and shutdown lifecycle."""
     logger.info(f"Starting {settings.APP_NAME} v{settings.APP_VERSION}")
-    await init_db()
+    # Removed await init_db() to save 3s of Vercel boot time over the 10s Lambda Limit
     logger.info("Application started successfully.")
     yield
     await close_db()
@@ -31,6 +31,12 @@ app = FastAPI(
     description="AI-powered mental health monitoring and intervention platform for school ecosystems.",
     lifespan=lifespan,
 )
+
+@app.get("/system/init_db", tags=["System"])
+async def trigger_init_db():
+    """Manual trigger to initialize Database tables avoiding lambda boot limits."""
+    await init_db()
+    return {"message": "Database tables created successfully."}
 
 # CORS Middleware — allow frontend origins
 app.add_middleware(

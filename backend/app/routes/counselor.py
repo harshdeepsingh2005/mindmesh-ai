@@ -30,7 +30,7 @@ from ..services.risk_scoring import (
     get_latest_risk_score,
     get_risk_history,
     batch_assess_students,
-    RISK_THRESHOLDS,
+    get_dynamic_thresholds,
     FACTOR_WEIGHTS,
 )
 from ..services.trend_analysis import analyze_trends
@@ -158,7 +158,7 @@ async def get_risk_thresholds(
     return RiskThresholdsResponse(
         thresholds={
             level: {"min": lo, "max": hi}
-            for level, (lo, hi) in RISK_THRESHOLDS.items()
+            for level, (lo, hi) in get_dynamic_thresholds().items()
         },
         factor_weights=FACTOR_WEIGHTS,
     )

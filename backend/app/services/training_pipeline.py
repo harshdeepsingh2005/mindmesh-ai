@@ -1,99 +1,76 @@
-"""MindMesh AI — Model Training Pipeline.
+"""MindMesh AI — Unsupervised Model Training Pipeline.
 
-Orchestrates the training → evaluation → registration → promotion
-workflow for all AI models.
+Orchestrates fitting of all unsupervised models on available data:
+
+  1. Text Embedding Engine  — TF-IDF vectoriser
+  2. Emotion Cluster Engine — K-Means on text embeddings
+  3. Anomaly Detection      — Isolation Forest on behavioural features
+  4. Student Clustering     — GMM on behavioural profiles
+  5. Topic Discovery        — NMF on text corpus
 
 Training steps:
-  1. Collect labelled data (from database or synthetic dataset)
-  2. Split into train / validation / test sets
-  3. Train model variant
-  4. Evaluate on held-out test set
-  5. Register in model registry as 'candidate'
-  6. Compare against active model
-  7. Optionally promote if candidate is better
-
-Supported model types:
-  • emotion_detection:  TF-IDF + NearestCentroid / keyword-rule baseline
-  • sentiment_analysis: Lexicon-based / TF-IDF regression
-  • risk_scoring:       Weighted composite / gradient boosting
+  1. Collect text data from BehavioralRecords (no labels needed)
+  2. Fit TF-IDF vectoriser on corpus
+  3. Fit K-Means emotion clusters
+  4. Build behavioural feature vectors per student
+  5. Fit Isolation Forest for anomaly detection
+  6. Fit GMM for student clustering
+  7. Fit NMF for topic discovery
+  8. Evaluate with unsupervised metrics (silhouette, CH index)
+  9. Register models in registry
 """
 
 from __future__ import annotations
 
-import math
-import random
+import time
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional
+
+import numpy as np
+from sklearn.metrics import silhouette_score, calinski_harabasz_score
 
 from ..logging_config import logger
-from .model_evaluation import (
-    evaluate_classification,
-    evaluate_regression,
-    evaluate_risk_scoring,
-    compare_models,
-    ClassificationMetrics,
-    RegressionMetrics,
-    RiskCalibrationMetrics,
-    ModelComparison,
-)
+from .text_embeddings import get_embedding_engine, reset_embedding_engine
+from .emotion_detection import get_emotion_engine
+from .anomaly_detection import get_anomaly_engine, BehavioralFeatureVector
+from .student_clustering import get_cluster_engine
+from .topic_discovery import get_topic_engine
 from .model_registry import registry, ModelVersion
 
 
-# ─── Data Structures ─────────────────────────────────────────────
+# ── Data Classes ─────────────────────────────────────────────────
 
 
 @dataclass
-class TrainingDataset:
-    """A labelled dataset for model training."""
+class UnsupervisedMetrics:
+    """Evaluation metrics for unsupervised models."""
+    silhouette_score: float = 0.0
+    calinski_harabasz_score: float = 0.0
+    n_clusters: int = 0
+    cluster_sizes: Dict[int, int] = field(default_factory=dict)
+    inertia: float = 0.0            # K-Means inertia
+    reconstruction_error: float = 0.0  # NMF reconstruction error
 
-    name: str
-    texts: List[str] = field(default_factory=list)
-    labels: List[str] = field(default_factory=list)
-    scores: List[float] = field(default_factory=list)
-    metadata: Dict[str, Any] = field(default_factory=dict)
-
-    @property
-    def size(self) -> int:
-        return len(self.texts)
-
-    def split(
-        self, train_ratio: float = 0.7, val_ratio: float = 0.15, seed: int = 42
-    ) -> Tuple["TrainingDataset", "TrainingDataset", "TrainingDataset"]:
-        """Split into train, validation, test sets."""
-        rng = random.Random(seed)
-        indices = list(range(self.size))
-        rng.shuffle(indices)
-
-        n_train = int(self.size * train_ratio)
-        n_val = int(self.size * val_ratio)
-
-        train_idx = indices[:n_train]
-        val_idx = indices[n_train : n_train + n_val]
-        test_idx = indices[n_train + n_val :]
-
-        def _subset(idx_list: List[int], suffix: str) -> "TrainingDataset":
-            return TrainingDataset(
-                name=f"{self.name}_{suffix}",
-                texts=[self.texts[i] for i in idx_list],
-                labels=[self.labels[i] for i in idx_list] if self.labels else [],
-                scores=[self.scores[i] for i in idx_list] if self.scores else [],
-            )
-
-        return _subset(train_idx, "train"), _subset(val_idx, "val"), _subset(test_idx, "test")
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "silhouette_score": round(self.silhouette_score, 4),
+            "calinski_harabasz_score": round(self.calinski_harabasz_score, 4),
+            "n_clusters": self.n_clusters,
+            "cluster_sizes": self.cluster_sizes,
+            "inertia": round(self.inertia, 4),
+            "reconstruction_error": round(self.reconstruction_error, 4),
+        }
 
 
 @dataclass
 class TrainingResult:
     """Result of a training pipeline run."""
-
     model_name: str
     new_version: str
     training_samples: int
-    test_samples: int
-    metrics: Dict[str, float]
-    comparison: Optional[ModelComparison] = None
+    metrics: Dict[str, Any]
     promoted: bool = False
     duration_seconds: float = 0.0
     completed_at: datetime = field(
@@ -101,498 +78,464 @@ class TrainingResult:
     )
 
 
-# ─── Synthetic Dataset Generation ────────────────────────────────
+# ── Synthetic Data Generation ────────────────────────────────────
 
+def generate_synthetic_corpus(n: int = 500, seed: int = 42) -> List[str]:
+    """Generate synthetic student text data for model fitting.
 
-def generate_emotion_dataset(n: int = 500, seed: int = 42) -> TrainingDataset:
-    """Generate a synthetic labelled emotion dataset for training.
-
-    Creates realistic-looking text snippets with known emotion labels.
+    Creates realistic journal entries and check-in texts without
+    requiring labels.  This is for bootstrapping models when
+    there's not enough real data yet.
     """
+    import random
     rng = random.Random(seed)
 
-    templates = {
-        "happy": [
-            "I feel great today, everything is going well",
-            "Had an amazing time with my friends after school",
-            "I'm really excited about the upcoming project",
-            "Feeling grateful for my family and teachers",
-            "Today was a wonderful day, I learned so much",
-            "I'm proud of my test results, worked hard for this",
-            "Laughed a lot today, my classmates are fun",
-            "Feeling confident about the future",
-        ],
-        "sad": [
-            "I feel really down today and don't know why",
-            "Nobody seems to understand how I feel",
-            "I miss my old friends since we moved schools",
-            "Everything feels pointless sometimes",
-            "I cried today and couldn't stop",
-            "Feeling lonely even when surrounded by people",
-            "I don't enjoy things I used to anymore",
-            "Today was really hard, I just want it to be over",
-        ],
-        "anxious": [
-            "I'm really worried about the exam tomorrow",
-            "Can't stop thinking about what might go wrong",
-            "My heart races whenever I have to present in class",
-            "I feel nervous all the time and can't relax",
-            "What if I fail and disappoint everyone",
-            "I keep having trouble sleeping because of worry",
-            "Social situations make me really uncomfortable",
-            "I feel overwhelmed by everything I need to do",
-        ],
-        "angry": [
-            "I'm so frustrated with how unfair things are",
-            "Someone said something really hurtful today",
-            "I can't stand when people don't listen to me",
-            "Everything is making me irritated lately",
-            "I got into an argument and I'm still upset",
-            "It's not fair that I get blamed for everything",
-            "I feel like screaming sometimes",
-            "People keep pushing my limits and I'm done",
-        ],
-        "neutral": [
-            "Today was an ordinary day at school",
-            "Had lunch and then went to class as usual",
-            "The weather was nice today",
-            "Studied for a bit and then watched some TV",
-            "Nothing much happened today",
-            "Went through my normal routine",
-            "Classes were okay, nothing special",
-            "Just another regular day",
-        ],
-    }
+    templates = [
+        # Positive
+        "I feel great today, everything is going well",
+        "Had an amazing time with my friends after school",
+        "I'm really excited about the upcoming project",
+        "Feeling grateful for my family and teachers",
+        "Today was a wonderful day, I learned so much",
+        "I'm proud of my test results, worked hard for this",
+        "Laughed a lot today, my classmates are fun",
+        "Feeling confident about the future",
+        "Made a new friend today, really happy about it",
+        "Class was interesting, enjoyed the group project",
+
+        # Negative — sadness
+        "I feel really down today and don't know why",
+        "Nobody seems to understand how I feel",
+        "I miss my old friends since we moved schools",
+        "Everything feels pointless sometimes",
+        "I cried today and couldn't stop the tears",
+        "Feeling lonely even when surrounded by people",
+        "I don't enjoy things I used to anymore",
+        "Today was really hard, I just want it to be over",
+
+        # Negative — anxiety
+        "I'm really worried about the exam tomorrow",
+        "Can't stop thinking about what might go wrong",
+        "My heart races whenever I have to present in class",
+        "I feel nervous all the time and can't relax",
+        "What if I fail and disappoint everyone",
+        "I keep having trouble sleeping because of worry",
+        "Social situations make me really uncomfortable",
+        "I feel overwhelmed by everything I need to do",
+
+        # Negative — anger
+        "I'm so frustrated with how unfair things are",
+        "Someone said something really hurtful today",
+        "I can't stand when people don't listen to me",
+        "Everything is making me irritated lately",
+        "I got into an argument and I'm still upset",
+
+        # Neutral
+        "Today was an ordinary day at school",
+        "Had lunch and then went to class as usual",
+        "The weather was nice today nothing special",
+        "Studied for a bit and then watched some TV",
+        "Nothing much happened today just another day",
+        "Went through my normal routine at school",
+        "Classes were okay nothing special happened",
+    ]
 
     modifiers = [
         "", " I think.", " Not sure what to do.", " Just wanted to share.",
         " It's been like this for a while.", " Hope tomorrow is different.",
+        " Talking about it helps.", " Just need to get through this week.",
     ]
 
     texts = []
-    labels = []
-
     for _ in range(n):
-        emotion = rng.choice(list(templates.keys()))
-        text = rng.choice(templates[emotion])
+        text = rng.choice(templates)
         text += rng.choice(modifiers)
-
-        # Add noise: 5% label flip to simulate real-world messiness
-        if rng.random() < 0.05:
-            emotion = rng.choice(list(templates.keys()))
-
         texts.append(text)
-        labels.append(emotion)
 
-    return TrainingDataset(
-        name="synthetic_emotion",
-        texts=texts,
-        labels=labels,
-        metadata={"generated": True, "n": n, "seed": seed},
-    )
+    return texts
 
 
-def generate_sentiment_dataset(n: int = 500, seed: int = 42) -> TrainingDataset:
-    """Generate a synthetic labelled sentiment dataset."""
-    emotion_ds = generate_emotion_dataset(n=n, seed=seed)
-    rng = random.Random(seed + 1)
+def generate_synthetic_features(
+    n: int = 100, seed: int = 42
+) -> List[BehavioralFeatureVector]:
+    """Generate synthetic behavioural feature vectors for model fitting."""
+    import random
+    rng = random.Random(seed)
 
-    # Map emotions to approximate sentiment scores
-    score_map = {
-        "happy": (0.4, 0.9),
-        "sad": (-0.8, -0.2),
-        "anxious": (-0.6, -0.1),
-        "angry": (-0.7, -0.2),
-        "neutral": (-0.1, 0.2),
-    }
+    features = []
+    for i in range(n):
+        # Create realistic distributions
+        # Most students are "normal", some are at-risk
+        is_at_risk = rng.random() < 0.15
 
-    scores = []
-    for label in emotion_ds.labels:
-        lo, hi = score_map.get(label, (-0.1, 0.1))
-        scores.append(round(rng.uniform(lo, hi), 3))
+        if is_at_risk:
+            fv = BehavioralFeatureVector(
+                student_id=f"synthetic_{i}",
+                avg_sentiment=rng.uniform(-0.8, -0.1),
+                sentiment_std=rng.uniform(0.3, 0.8),
+                negative_ratio=rng.uniform(0.4, 0.9),
+                dominant_cluster=rng.randint(0, 2),
+                emotion_entropy=rng.uniform(0.5, 2.0),
+                distress_ratio=rng.uniform(0.3, 0.8),
+                entries_per_week=rng.uniform(0.5, 3.0),
+                journal_ratio=rng.uniform(0.3, 0.8),
+                days_since_last_entry=rng.uniform(0, 14),
+                avg_mood=rng.uniform(1.0, 2.5),
+                mood_std=rng.uniform(0.8, 2.0),
+                high_risk_flags=rng.randint(0, 3),
+            )
+        else:
+            fv = BehavioralFeatureVector(
+                student_id=f"synthetic_{i}",
+                avg_sentiment=rng.uniform(0.0, 0.6),
+                sentiment_std=rng.uniform(0.1, 0.3),
+                negative_ratio=rng.uniform(0.05, 0.25),
+                dominant_cluster=rng.randint(0, 4),
+                emotion_entropy=rng.uniform(1.0, 2.5),
+                distress_ratio=rng.uniform(0.0, 0.15),
+                entries_per_week=rng.uniform(2.0, 7.0),
+                journal_ratio=rng.uniform(0.2, 0.6),
+                days_since_last_entry=rng.uniform(0, 3),
+                avg_mood=rng.uniform(3.0, 5.0),
+                mood_std=rng.uniform(0.2, 0.7),
+                high_risk_flags=0,
+            )
 
-    return TrainingDataset(
-        name="synthetic_sentiment",
-        texts=emotion_ds.texts,
-        labels=emotion_ds.labels,
-        scores=scores,
-        metadata={"generated": True, "n": n, "seed": seed},
-    )
+        features.append(fv)
 
-
-# ─── TF-IDF Feature Extraction (lightweight, no external deps) ──
-
-
-class SimpleTfidfVectorizer:
-    """Minimal TF-IDF vectorizer for the training pipeline.
-
-    Avoids heavy sklearn import at module level but can be used
-    for lightweight model training within the app.
-    """
-
-    def __init__(self, max_features: int = 3000) -> None:
-        self.max_features = max_features
-        self.vocabulary_: Dict[str, int] = {}
-        self.idf_: Dict[str, float] = {}
-
-    def fit(self, documents: List[str]) -> "SimpleTfidfVectorizer":
-        """Build vocabulary and compute IDF from documents."""
-        word_doc_count: Counter = Counter()
-        all_words: Counter = Counter()
-
-        for doc in documents:
-            words = set(self._tokenize(doc))
-            for w in words:
-                word_doc_count[w] += 1
-            for w in self._tokenize(doc):
-                all_words[w] += 1
-
-        # Select top N words by frequency
-        top_words = [w for w, _ in all_words.most_common(self.max_features)]
-        self.vocabulary_ = {w: i for i, w in enumerate(top_words)}
-
-        n_docs = len(documents)
-        self.idf_ = {
-            w: math.log((n_docs + 1) / (word_doc_count[w] + 1)) + 1
-            for w in self.vocabulary_
-        }
-
-        return self
-
-    def transform(self, documents: List[str]) -> List[List[float]]:
-        """Transform documents into TF-IDF vectors."""
-        vectors = []
-        for doc in documents:
-            tokens = self._tokenize(doc)
-            tf: Counter = Counter(tokens)
-            n_tokens = len(tokens) or 1
-
-            vector = [0.0] * len(self.vocabulary_)
-            for word, idx in self.vocabulary_.items():
-                if word in tf:
-                    tfidf = (tf[word] / n_tokens) * self.idf_.get(word, 1.0)
-                    vector[idx] = tfidf
-
-            # L2 normalize
-            norm = math.sqrt(sum(v ** 2 for v in vector)) or 1.0
-            vector = [v / norm for v in vector]
-            vectors.append(vector)
-
-        return vectors
-
-    def fit_transform(self, documents: List[str]) -> List[List[float]]:
-        self.fit(documents)
-        return self.transform(documents)
-
-    @staticmethod
-    def _tokenize(text: str) -> List[str]:
-        """Simple whitespace + lowercase tokenizer."""
-        return text.lower().split()
+    return features
 
 
-# ─── Simple Nearest-Centroid Classifier ──────────────────────────
+# ── Training Pipelines ──────────────────────────────────────────
 
 
-class NearestCentroidClassifier:
-    """Simple centroid-based classifier.
-
-    Computes the mean vector for each class during training,
-    then predicts based on closest centroid (cosine similarity).
-    """
-
-    def __init__(self) -> None:
-        self.centroids: Dict[str, List[float]] = {}
-        self.classes: List[str] = []
-
-    def fit(self, X: List[List[float]], y: List[str]) -> "NearestCentroidClassifier":
-        """Fit centroids from training data."""
-        class_vectors: Dict[str, List[List[float]]] = {}
-        for vec, label in zip(X, y):
-            class_vectors.setdefault(label, []).append(vec)
-
-        self.classes = sorted(class_vectors.keys())
-        dim = len(X[0]) if X else 0
-
-        for label, vectors in class_vectors.items():
-            centroid = [0.0] * dim
-            for vec in vectors:
-                for i, v in enumerate(vec):
-                    centroid[i] += v
-            n = len(vectors)
-            centroid = [c / n for c in centroid]
-            self.centroids[label] = centroid
-
-        return self
-
-    def predict(self, X: List[List[float]]) -> List[str]:
-        """Predict class labels."""
-        predictions = []
-        for vec in X:
-            best_label = self.classes[0] if self.classes else "neutral"
-            best_sim = -1.0
-
-            for label, centroid in self.centroids.items():
-                sim = self._cosine_similarity(vec, centroid)
-                if sim > best_sim:
-                    best_sim = sim
-                    best_label = label
-
-            predictions.append(best_label)
-
-        return predictions
-
-    @staticmethod
-    def _cosine_similarity(a: List[float], b: List[float]) -> float:
-        dot = sum(ai * bi for ai, bi in zip(a, b))
-        norm_a = math.sqrt(sum(ai ** 2 for ai in a)) or 1.0
-        norm_b = math.sqrt(sum(bi ** 2 for bi in b)) or 1.0
-        return dot / (norm_a * norm_b)
-
-
-# ─── Training Pipelines ─────────────────────────────────────────
-
-
-async def train_emotion_model(
-    dataset: Optional[TrainingDataset] = None,
-    version: str = "2.0.0",
-    max_features: int = 3000,
-    auto_promote: bool = False,
+async def train_text_embeddings(
+    corpus: Optional[List[str]] = None,
+    version: str = "3.0.0",
 ) -> TrainingResult:
-    """Train an improved emotion detection model.
-
-    Steps:
-      1. Generate/use labelled dataset
-      2. TF-IDF feature extraction
-      3. Train nearest-centroid classifier
-      4. Evaluate on test set
-      5. Compare with active model
-      6. Register and optionally promote
-
-    Args:
-        dataset: Pre-built dataset, or None to generate synthetic.
-        version: Version string for the new model.
-        max_features: TF-IDF vocabulary size.
-        auto_promote: If True, promote if better than active.
-
-    Returns:
-        TrainingResult with metrics and comparison.
-    """
-    import time
+    """Train the TF-IDF text embedding engine."""
     start = time.time()
 
-    if dataset is None:
-        dataset = generate_emotion_dataset(n=500)
+    if corpus is None:
+        corpus = generate_synthetic_corpus(n=500)
 
-    train_ds, val_ds, test_ds = dataset.split()
-
-    logger.info(
-        f"Training emotion model v{version}: "
-        f"train={train_ds.size}, val={val_ds.size}, test={test_ds.size}"
-    )
-
-    # Feature extraction
-    vectorizer = SimpleTfidfVectorizer(max_features=max_features)
-    X_train = vectorizer.fit_transform(train_ds.texts)
-    X_test = vectorizer.transform(test_ds.texts)
-
-    # Train classifier
-    classifier = NearestCentroidClassifier()
-    classifier.fit(X_train, train_ds.labels)
-
-    # Predict on test set
-    y_pred = classifier.predict(X_test)
-
-    # Evaluate
-    metrics = evaluate_classification(
-        test_ds.labels, y_pred,
-        model_name="emotion_detection",
-        model_version=version,
-    )
-
-    # Compare with active model
-    comparison = None
-    active = registry.get_active("emotion_detection")
-    if active and active.metrics:
-        # Build a pseudo ClassificationMetrics from stored metrics
-        active_metrics = ClassificationMetrics(
-            model_name="emotion_detection",
-            model_version=active.version,
-            accuracy=active.metrics.get("accuracy", 0),
-            macro_f1=active.metrics.get("macro_f1", 0),
-            weighted_f1=active.metrics.get("weighted_f1", 0),
-            macro_precision=active.metrics.get("macro_precision", 0),
-            macro_recall=active.metrics.get("macro_recall", 0),
-        )
-        comparison = compare_models(active_metrics, metrics)
-
-    # Register
-    new_model = ModelVersion(
-        model_name="emotion_detection",
-        version=version,
-        status="candidate",
-        config={
-            "type": "tfidf_nearest_centroid",
-            "max_features": max_features,
-            "train_size": train_ds.size,
-            "test_size": test_ds.size,
-        },
-        metrics={
-            "accuracy": metrics.accuracy,
-            "macro_f1": metrics.macro_f1,
-            "weighted_f1": metrics.weighted_f1,
-            "macro_precision": metrics.macro_precision,
-            "macro_recall": metrics.macro_recall,
-        },
-        description=f"TF-IDF + NearestCentroid emotion classifier v{version}",
-    )
-    registry.register(new_model)
-
-    # Auto-promote if better
-    promoted = False
-    if auto_promote and comparison and comparison.winner == version:
-        registry.activate("emotion_detection", version)
-        promoted = True
-        logger.info(f"Auto-promoted emotion model v{version}")
+    engine = get_embedding_engine()
+    engine.fit(corpus)
 
     duration = time.time() - start
 
-    result = TrainingResult(
-        model_name="emotion_detection",
-        new_version=version,
-        training_samples=train_ds.size,
-        test_samples=test_ds.size,
-        metrics=new_model.metrics,
-        comparison=comparison,
-        promoted=promoted,
-        duration_seconds=round(duration, 2),
-    )
-
-    logger.info(
-        f"Emotion training complete: v{version}, "
-        f"accuracy={metrics.accuracy:.4f}, f1={metrics.weighted_f1:.4f}, "
-        f"promoted={promoted}, duration={duration:.2f}s"
-    )
-
-    return result
-
-
-async def train_sentiment_model(
-    dataset: Optional[TrainingDataset] = None,
-    version: str = "2.0.0",
-    auto_promote: bool = False,
-) -> TrainingResult:
-    """Train an improved sentiment analysis model.
-
-    Uses TF-IDF features with centroid-based regression
-    (weighted average of class centroids by score).
-
-    Args:
-        dataset: Pre-built dataset, or None to generate synthetic.
-        version: Version string.
-        auto_promote: If True, promote if better.
-
-    Returns:
-        TrainingResult with metrics.
-    """
-    import time
-    start = time.time()
-
-    if dataset is None:
-        dataset = generate_sentiment_dataset(n=500)
-
-    train_ds, val_ds, test_ds = dataset.split()
-
-    logger.info(
-        f"Training sentiment model v{version}: "
-        f"train={train_ds.size}, val={val_ds.size}, test={test_ds.size}"
-    )
-
-    # For sentiment, we use the existing lexicon-based approach
-    # but evaluate it properly on the test set to get benchmarks.
-    from .sentiment_analysis import analyze_sentiment
-
-    y_true = test_ds.scores
-    y_pred = []
-    for text in test_ds.texts:
-        result = analyze_sentiment(text)
-        y_pred.append(result.sentiment_score)
-
-    reg_metrics = evaluate_regression(
-        y_true, y_pred,
-        model_name="sentiment_analysis",
-        model_version=version,
-    )
-
-    # Register
-    new_model = ModelVersion(
-        model_name="sentiment_analysis",
+    # Register in model registry
+    model = ModelVersion(
+        model_name="text_embeddings",
         version=version,
-        status="candidate",
-        config={
-            "type": "lexicon_evaluated",
-            "train_size": train_ds.size,
-            "test_size": test_ds.size,
-        },
-        metrics={
-            "mae": reg_metrics.mae,
-            "rmse": reg_metrics.rmse,
-            "r_squared": reg_metrics.r_squared,
-            "pearson_correlation": reg_metrics.pearson_correlation,
-        },
-        description=f"Lexicon sentiment analyser v{version} (re-evaluated)",
+        status="active",
+        config=engine.get_config(),
+        metrics={"vocabulary_size": engine.vocabulary_size},
+        description=f"TF-IDF text embedding engine v{version}",
+        activated_at=datetime.now(timezone.utc),
     )
-    registry.register(new_model)
+    registry.register(model)
 
-    # Auto-promote check
-    promoted = False
-    active = registry.get_active("sentiment_analysis")
-    if auto_promote and active and active.metrics:
-        active_mae = active.metrics.get("mae", 1.0)
-        if reg_metrics.mae < active_mae:
-            registry.activate("sentiment_analysis", version)
-            promoted = True
-
-    duration = time.time() - start
+    logger.info(
+        f"Text embeddings trained: v{version}, "
+        f"vocab={engine.vocabulary_size}, "
+        f"corpus={len(corpus)}, duration={duration:.2f}s"
+    )
 
     return TrainingResult(
-        model_name="sentiment_analysis",
+        model_name="text_embeddings",
         new_version=version,
-        training_samples=train_ds.size,
-        test_samples=test_ds.size,
-        metrics=new_model.metrics,
-        promoted=promoted,
+        training_samples=len(corpus),
+        metrics={"vocabulary_size": engine.vocabulary_size},
+        promoted=True,
         duration_seconds=round(duration, 2),
     )
+
+
+async def train_emotion_clusters(
+    corpus: Optional[List[str]] = None,
+    version: str = "3.0.0",
+    n_clusters: int = 5,
+) -> TrainingResult:
+    """Train the K-Means emotion clustering engine."""
+    start = time.time()
+
+    if corpus is None:
+        corpus = generate_synthetic_corpus(n=500)
+
+    # Ensure embeddings are fitted
+    engine = get_embedding_engine()
+    if not engine.is_fitted:
+        engine.fit(corpus)
+
+    # Fit emotion clusters
+    emotion_engine = get_emotion_engine()
+    emotion_engine.n_clusters = n_clusters
+    emotion_engine.fit(corpus)
+
+    # Evaluate: compute silhouette on the clustered data
+    X = engine.transform(corpus)
+    labels = [emotion_engine.predict(t).predicted_cluster for t in corpus]
+
+    metrics_dict: Dict[str, Any] = {
+        "n_clusters": len(emotion_engine.clusters),
+    }
+
+    if len(set(labels)) > 1:
+        sil = silhouette_score(X, labels, metric="cosine")
+        ch = calinski_harabasz_score(X, labels)
+        metrics_dict["silhouette_score"] = round(sil, 4)
+        metrics_dict["calinski_harabasz_score"] = round(ch, 4)
+
+    # Cluster sizes
+    cluster_sizes = Counter(labels)
+    metrics_dict["cluster_sizes"] = dict(cluster_sizes)
+
+    duration = time.time() - start
+
+    # Register
+    model = ModelVersion(
+        model_name="emotion_detection",
+        version=version,
+        status="active",
+        config=emotion_engine.get_config(),
+        metrics=metrics_dict,
+        description=f"K-Means emotion clustering v{version}",
+        activated_at=datetime.now(timezone.utc),
+    )
+    registry.register(model)
+
+    logger.info(
+        f"Emotion clustering trained: v{version}, "
+        f"k={len(emotion_engine.clusters)}, "
+        f"silhouette={metrics_dict.get('silhouette_score', 'N/A')}"
+    )
+
+    return TrainingResult(
+        model_name="emotion_detection",
+        new_version=version,
+        training_samples=len(corpus),
+        metrics=metrics_dict,
+        promoted=True,
+        duration_seconds=round(duration, 2),
+    )
+
+
+async def train_anomaly_detection(
+    features: Optional[List[BehavioralFeatureVector]] = None,
+    version: str = "1.0.0",
+    contamination: float = 0.1,
+) -> TrainingResult:
+    """Train the Isolation Forest anomaly detection engine."""
+    start = time.time()
+
+    if features is None:
+        features = generate_synthetic_features(n=100)
+
+    anomaly_engine = get_anomaly_engine()
+    anomaly_engine.contamination = contamination
+    anomaly_engine.fit(features)
+
+    # Evaluate
+    report = anomaly_engine.predict_batch(features)
+
+    metrics_dict = {
+        "total_students": report.total_students,
+        "anomalies_detected": report.anomalies_detected,
+        "anomaly_rate": report.anomaly_rate,
+        "contamination": contamination,
+    }
+
+    duration = time.time() - start
+
+    model = ModelVersion(
+        model_name="anomaly_detection",
+        version=version,
+        status="active",
+        config=anomaly_engine.get_config(),
+        metrics=metrics_dict,
+        description=f"Isolation Forest anomaly detection v{version}",
+        activated_at=datetime.now(timezone.utc),
+    )
+    registry.register(model)
+
+    logger.info(
+        f"Anomaly detection trained: v{version}, "
+        f"samples={len(features)}, "
+        f"anomaly_rate={report.anomaly_rate:.4f}"
+    )
+
+    return TrainingResult(
+        model_name="anomaly_detection",
+        new_version=version,
+        training_samples=len(features),
+        metrics=metrics_dict,
+        promoted=True,
+        duration_seconds=round(duration, 2),
+    )
+
+
+async def train_student_clustering(
+    features: Optional[List[BehavioralFeatureVector]] = None,
+    version: str = "1.0.0",
+) -> TrainingResult:
+    """Train the GMM student clustering engine."""
+    start = time.time()
+
+    if features is None:
+        features = generate_synthetic_features(n=100)
+
+    cluster_engine = get_cluster_engine()
+    cluster_engine.fit(features)
+
+    report = cluster_engine.generate_report(features)
+
+    metrics_dict = {
+        "n_clusters": report.n_clusters,
+        "silhouette_score": report.silhouette_score,
+        "calinski_harabasz_score": report.calinski_harabasz_score,
+        "total_students": report.total_students,
+    }
+
+    duration = time.time() - start
+
+    model = ModelVersion(
+        model_name="student_clustering",
+        version=version,
+        status="active",
+        config=cluster_engine.get_config(),
+        metrics=metrics_dict,
+        description=f"GMM student clustering v{version}",
+        activated_at=datetime.now(timezone.utc),
+    )
+    registry.register(model)
+
+    logger.info(
+        f"Student clustering trained: v{version}, "
+        f"k={report.n_clusters}, "
+        f"silhouette={report.silhouette_score:.4f}"
+    )
+
+    return TrainingResult(
+        model_name="student_clustering",
+        new_version=version,
+        training_samples=len(features),
+        metrics=metrics_dict,
+        promoted=True,
+        duration_seconds=round(duration, 2),
+    )
+
+
+async def train_topic_discovery(
+    corpus: Optional[List[str]] = None,
+    version: str = "1.0.0",
+    n_topics: int = 8,
+) -> TrainingResult:
+    """Train the NMF topic discovery engine."""
+    start = time.time()
+
+    if corpus is None:
+        corpus = generate_synthetic_corpus(n=500)
+
+    topic_engine = get_topic_engine()
+    topic_engine.n_topics = n_topics
+    topic_engine.fit(corpus)
+
+    report = topic_engine.get_report(total_documents=len(corpus))
+
+    metrics_dict = {
+        "n_topics": report.n_topics,
+        "reconstruction_error": report.reconstruction_error,
+        "total_documents": report.total_documents,
+        "topic_labels": [t.label for t in report.topics],
+    }
+
+    duration = time.time() - start
+
+    model = ModelVersion(
+        model_name="topic_discovery",
+        version=version,
+        status="active",
+        config=topic_engine.get_config(),
+        metrics=metrics_dict,
+        description=f"NMF topic discovery v{version}",
+        activated_at=datetime.now(timezone.utc),
+    )
+    registry.register(model)
+
+    logger.info(
+        f"Topic discovery trained: v{version}, "
+        f"topics={report.n_topics}, "
+        f"recon_error={report.reconstruction_error:.4f}"
+    )
+
+    return TrainingResult(
+        model_name="topic_discovery",
+        new_version=version,
+        training_samples=len(corpus),
+        metrics=metrics_dict,
+        promoted=True,
+        duration_seconds=round(duration, 2),
+    )
+
+
+# ── Full Pipeline ────────────────────────────────────────────────
 
 
 async def run_full_training_pipeline(
-    auto_promote: bool = False,
+    corpus: Optional[List[str]] = None,
+    features: Optional[List[BehavioralFeatureVector]] = None,
 ) -> List[TrainingResult]:
-    """Run training for all models sequentially.
+    """Run the complete unsupervised training pipeline.
+
+    Fits all models sequentially in the correct dependency order:
+      1. Text embeddings (foundation)
+      2. Emotion clusters (depends on embeddings)
+      3. Topic discovery (depends on embeddings)
+      4. Anomaly detection (depends on feature vectors)
+      5. Student clustering (depends on feature vectors)
 
     Args:
-        auto_promote: Whether to auto-promote better models.
+        corpus: Optional text corpus. Uses synthetic if not provided.
+        features: Optional feature vectors. Uses synthetic if not provided.
 
     Returns:
         List of TrainingResult for each model.
     """
+    logger.info("=== Starting full unsupervised training pipeline ===")
+    start = time.time()
     results = []
 
-    logger.info("=== Starting full training pipeline ===")
+    # Generate data if not provided
+    if corpus is None:
+        corpus = generate_synthetic_corpus(n=500)
+    if features is None:
+        features = generate_synthetic_features(n=100)
 
-    emotion_result = await train_emotion_model(
-        version="2.0.0", auto_promote=auto_promote
-    )
-    results.append(emotion_result)
+    # 1. Text embeddings
+    result = await train_text_embeddings(corpus=corpus, version="3.0.0")
+    results.append(result)
 
-    sentiment_result = await train_sentiment_model(
-        version="2.0.0", auto_promote=auto_promote
-    )
-    results.append(sentiment_result)
+    # 2. Emotion clusters
+    result = await train_emotion_clusters(corpus=corpus, version="3.0.0")
+    results.append(result)
 
+    # 3. Topic discovery
+    result = await train_topic_discovery(corpus=corpus, version="1.0.0")
+    results.append(result)
+
+    # 4. Anomaly detection
+    result = await train_anomaly_detection(features=features, version="1.0.0")
+    results.append(result)
+
+    # 5. Student clustering
+    result = await train_student_clustering(features=features, version="1.0.0")
+    results.append(result)
+
+    total_time = time.time() - start
     logger.info(
         f"=== Training pipeline complete: "
-        f"{len(results)} models trained ==="
+        f"{len(results)} models trained in {total_time:.2f}s ==="
     )
 
     return results

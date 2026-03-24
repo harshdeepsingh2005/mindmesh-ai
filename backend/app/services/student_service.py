@@ -11,12 +11,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..models.student import Student
 from ..models.behavioral_record import BehavioralRecord
 from ..models.user import User
+from ..models.alert import Alert
 from ..database.schemas import (
     StudentCreate,
     StudentUpdate,
     StudentDetailResponse,
     MoodCheckinRequest,
     JournalEntryRequest,
+    SOSRequest,
+    PeerReportRequest,
 )
 from ..utils.sanitize import sanitize_text, sanitize_identifier, sanitize_name
 from ..logging_config import logger
@@ -213,6 +216,63 @@ class StudentService:
             await self._run_ai_analysis(record)
 
         return record
+
+    # ─── Crisis Intervention ────────────────────────────────
+    
+    async def trigger_sos(self, current_user: User, payload: SOSRequest) -> Alert:
+        """Trigger an SOS active alert."""
+        student = await self._get_student_for_user(current_user)
+        
+        # In a real deployed app, send SNS/Twilio SMS to counselor here
+        msg = "SOS TRIGGERED."
+        if payload.location:
+            msg += f" Location: {payload.location}."
+        if payload.notes:
+            msg += f" Notes: {payload.notes}."
+            
+        alert = Alert(
+            id=str(uuid.uuid4()),
+            student_id=student.id,
+            risk_score=100,  # Max out
+            alert_type="sos",
+            message=msg,
+            status="active",
+        )
+        self.db.add(alert)
+        await self.db.commit()
+        await self.db.refresh(alert)
+        return alert
+
+    async def report_peer(self, current_user: User, payload: PeerReportRequest) -> Alert:
+        """Report a concern for a peer."""
+        # Check if the peer exists
+        peer_query = select(Student).where(
+            Student.student_identifier == sanitize_identifier(payload.peer_identifier)
+        )
+        peer_result = await self.db.execute(peer_query)
+        peer = peer_result.scalar_one_or_none()
+        
+        if not peer:
+            # We silently accept it to avoid revealing student identifiers (Privacy)
+            # Or log it as invalid identifier. We will just return a fake success below.
+            logger.warning(f"Peer report for missing identifier: {payload.peer_identifier}")
+            return Alert(id=str(uuid.uuid4()), student_id="unknown", risk_score=50, alert_type="peer_concern", message=payload.concern, status="resolved")
+            
+        reporter_name = current_user.name if current_user.name else "Anonymous Peer"
+        
+        # We store the alert against the peer
+        alert = Alert(
+            id=str(uuid.uuid4()),
+            student_id=peer.id,
+            risk_score=85, # High risk bump from peer
+            alert_type="peer_concern",
+            message=f"Peer Concern Reported: {payload.concern}",
+            status="active"
+        )
+        self.db.add(alert)
+        await self.db.commit()
+        await self.db.refresh(alert)
+        return alert
 
     # ─── Behavioral Records ─────────────────────────────────
 

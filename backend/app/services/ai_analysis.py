@@ -1,12 +1,14 @@
-"""MindMesh AI — AI Analysis Orchestrator.
+"""MindMesh AI — AI Analysis Orchestrator (Unsupervised).
 
-Coordinates emotion detection, sentiment analysis, and trend analysis.
-Stores all model predictions in the database via EmotionAnalysis records.
-After each analysis, triggers a risk re-assessment for the student.
-If the assessment produces a high-risk score, generates an alert and
-notifies teachers.
+Coordinates the unsupervised analysis pipeline:
+  1. VADER sentiment analysis
+  2. K-Means emotion cluster assignment
+  3. NMF topic discovery
+  4. Risk re-assessment (Isolation Forest anomaly detection)
+  5. Alert generation + teacher notification
 
-This is the central service that routes invoke to analyze behavioral data.
+This is the central service that routes invoke to analyze
+behavioral data through the unsupervised ML pipeline.
 """
 
 import uuid
@@ -20,21 +22,23 @@ from ..logging_config import logger
 
 from .emotion_detection import detect_emotion, EmotionResult
 from .sentiment_analysis import analyze_sentiment, SentimentResult
+from .topic_discovery import get_topic_engine
 
 
 async def analyze_record(
     db: AsyncSession,
     record: BehavioralRecord,
 ) -> Optional[EmotionAnalysis]:
-    """Run full AI analysis pipeline on a behavioral record.
+    """Run full unsupervised AI analysis pipeline on a behavioral record.
 
     Steps:
-    1. Detect emotion from text input
-    2. Analyze sentiment polarity
-    3. Update record with scores
-    4. Store EmotionAnalysis prediction in database
-    5. Trigger risk re-assessment for the student
-    6. Generate alert + notify teachers if high risk
+    1. Analyze sentiment with VADER
+    2. Assign emotion cluster via K-Means
+    3. Discover topic via NMF
+    4. Update record with scores
+    5. Store EmotionAnalysis prediction in database
+    6. Trigger risk re-assessment (Isolation Forest)
+    7. Generate alert + notify teachers if high risk
 
     Args:
         db: Async database session.
@@ -45,34 +49,32 @@ async def analyze_record(
     """
     text = record.text_input
 
-    # Run emotion detection
-    emotion_result: EmotionResult = detect_emotion(text)
-
-    # Run sentiment analysis
+    # 1. VADER sentiment analysis
     sentiment_result: SentimentResult = analyze_sentiment(text)
 
-    # Update the behavioral record with computed scores
-    if record.emotion_score is None and emotion_result.predicted_emotion != "neutral":
-        # Map emotion to a 0-1 score (positive emotions = high, negative = low)
-        emotion_valence = {
-            "happy": 0.85,
-            "neutral": 0.50,
-            "sad": 0.20,
-            "anxious": 0.25,
-            "angry": 0.20,
-        }
-        record.emotion_score = emotion_valence.get(
-            emotion_result.predicted_emotion, 0.5
-        )
+    # 2. K-Means emotion cluster assignment
+    emotion_result: EmotionResult = detect_emotion(text)
+
+    # 3. NMF topic discovery (if engine is fitted)
+    topic_engine = get_topic_engine()
+    topic_label = "unknown"
+    if topic_engine.is_fitted and text:
+        topic_result = topic_engine.predict(text)
+        topic_label = topic_result.topic_label
+
+    # 4. Update the behavioral record with computed scores
+    if record.emotion_score is None:
+        # Map sentiment compound score to 0-1 (positive = high)
+        record.emotion_score = (sentiment_result.sentiment_score + 1) / 2
 
     if record.sentiment_score is None:
         record.sentiment_score = sentiment_result.sentiment_score
 
-    # Create EmotionAnalysis record
+    # 5. Create EmotionAnalysis record
     analysis = EmotionAnalysis(
         id=str(uuid.uuid4()),
         record_id=record.id,
-        predicted_emotion=emotion_result.predicted_emotion,
+        predicted_emotion=emotion_result.cluster_label,
         confidence_score=emotion_result.confidence_score,
         model_version=emotion_result.model_version,
     )
@@ -83,14 +85,15 @@ async def analyze_record(
 
     logger.info(
         f"AI analysis complete: record_id={record.id}, "
-        f"emotion={emotion_result.predicted_emotion} "
+        f"emotion_cluster={emotion_result.cluster_label} "
         f"(conf={emotion_result.confidence_score}), "
         f"sentiment={sentiment_result.sentiment_label} "
-        f"(score={sentiment_result.sentiment_score}), "
+        f"(compound={sentiment_result.sentiment_score}), "
+        f"topic={topic_label}, "
         f"high_risk={sentiment_result.high_risk_flag}"
     )
 
-    # ── Trigger risk re-assessment + alert generation ────────────
+    # ── 6. Trigger risk re-assessment ────────────────────────
     try:
         from .risk_scoring import assess_student_risk
 
@@ -98,10 +101,11 @@ async def analyze_record(
             db, record.student_id, lookback_days=30
         )
         logger.info(
-            f"Risk re-assessment after analysis: "
+            f"Risk re-assessment: "
             f"student_id={record.student_id}, "
             f"score={assessment.composite_score}, "
-            f"level={assessment.risk_level}"
+            f"level={assessment.risk_level}, "
+            f"anomaly_factor={assessment.factors.anomaly_score:.2f}"
         )
 
         # Generate alert and notify teachers if high risk
@@ -115,20 +119,19 @@ async def analyze_record(
         )
         if alert_result:
             logger.warning(
-                f"Alert generated after analysis: "
+                f"Alert generated: "
                 f"alert_id={alert_result['alert_id']}, "
                 f"notifications={alert_result['notifications_sent']}"
             )
 
     except Exception as exc:
-        # Non-fatal — log but don't block the analysis response
         logger.error(
             f"Post-analysis pipeline failed for "
             f"student_id={record.student_id}: {exc}",
             exc_info=True,
         )
 
-    # ── Immediate alert on high-risk content detection ───────────
+    # ── Immediate alert on high-risk content ─────────────────
     if sentiment_result.high_risk_flag:
         try:
             from .alert_service import generate_alert, notify_teachers
@@ -172,16 +175,30 @@ async def analyze_text_standalone(
         text: Input text to analyze.
 
     Returns:
-        Dict with emotion and sentiment analysis results.
+        Dict with emotion, sentiment, and topic analysis results.
     """
     emotion_result = detect_emotion(text)
     sentiment_result = analyze_sentiment(text)
 
+    # Topic analysis (if fitted)
+    topic_info = {}
+    topic_engine = get_topic_engine()
+    if topic_engine.is_fitted:
+        topic_result = topic_engine.predict(text)
+        topic_info = {
+            "dominant_topic": topic_result.dominant_topic,
+            "topic_label": topic_result.topic_label,
+            "topic_distribution": topic_result.topic_distribution,
+            "confidence": topic_result.confidence,
+        }
+
     return {
         "emotion": {
-            "predicted_emotion": emotion_result.predicted_emotion,
+            "predicted_cluster": emotion_result.predicted_cluster,
+            "cluster_label": emotion_result.cluster_label,
             "confidence_score": emotion_result.confidence_score,
-            "emotion_scores": emotion_result.emotion_scores,
+            "cluster_distances": emotion_result.cluster_distances,
+            "top_terms": emotion_result.top_terms,
             "model_version": emotion_result.model_version,
         },
         "sentiment": {
@@ -189,8 +206,10 @@ async def analyze_text_standalone(
             "sentiment_score": sentiment_result.sentiment_score,
             "positive_score": sentiment_result.positive_score,
             "negative_score": sentiment_result.negative_score,
+            "neutral_score": sentiment_result.neutral_score,
             "high_risk_flag": sentiment_result.high_risk_flag,
             "high_risk_keywords_found": sentiment_result.high_risk_keywords_found,
             "model_version": sentiment_result.model_version,
         },
+        "topic": topic_info,
     }

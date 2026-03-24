@@ -1,212 +1,405 @@
-"""MindMesh AI — Emotion Detection Pipeline.
+"""MindMesh AI — Emotion Discovery Pipeline (Unsupervised).
 
-Detects emotional state from text input using keyword-based
-heuristics and scoring. Designed as a pluggable pipeline that
-can be upgraded to transformer-based models in later phases.
+Discovers emotional clusters from student text inputs using
+K-Means clustering on TF-IDF embeddings.  Unlike supervised
+classifiers, this module does NOT rely on pre-labelled data.
 
-NOTE: This module provides risk INDICATORS only. It does NOT
-generate clinical diagnoses. All high-risk outputs must be
+How it works:
+  1. Text → TF-IDF vector (via TextEmbeddingEngine)
+  2. K-Means clusters the embedding space into K groups
+  3. Each cluster is auto-labelled by inspecting its top TF-IDF terms
+  4. New text is assigned to the nearest cluster centroid
+
+The cluster labels are semantic summaries (e.g. "distress_anxiety",
+"positive_social", "academic_stress") derived from term analysis,
+NOT hardcoded emotion categories.
+
+NOTE: This module provides behavioural INDICATORS only.  It does NOT
+generate clinical diagnoses.  All high-risk outputs must be
 escalated to human counselors.
 """
 
-import re
+from __future__ import annotations
+
+import os
+import joblib
+import numpy as np
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
+from sklearn.cluster import MiniBatchKMeans
+from sklearn.metrics import silhouette_score
+from sklearn.metrics.pairwise import cosine_distances
+
+from ..config import settings
 from ..logging_config import logger
-
-# Fallback model version identifier
-_FALLBACK_VERSION = "emotion-v0.2.0-keyword"
+from .text_embeddings import get_embedding_engine, preprocess_text
 
 
-def _get_model_version() -> str:
-    """Get the active emotion detection model version from the registry."""
-    try:
-        from .model_registry import registry
-        return registry.get_active_version_string("emotion_detection")
-    except Exception:
-        return _FALLBACK_VERSION
+# ── Constants ────────────────────────────────────────────────────
 
-# Emotion lexicons — weighted keyword lists for each emotion category
-EMOTION_LEXICONS: Dict[str, Dict[str, float]] = {
-    "happy": {
-        "happy": 1.0, "joy": 1.0, "excited": 0.9, "great": 0.8,
-        "wonderful": 0.9, "amazing": 0.9, "good": 0.6, "love": 0.8,
-        "grateful": 0.8, "thankful": 0.7, "cheerful": 0.9, "glad": 0.7,
-        "delighted": 0.9, "fantastic": 0.9, "awesome": 0.8, "pleased": 0.7,
-        "smile": 0.7, "laugh": 0.8, "fun": 0.7, "enjoy": 0.7,
-        "positive": 0.6, "hope": 0.6, "proud": 0.7, "confident": 0.7,
-    },
-    "sad": {
-        "sad": 1.0, "unhappy": 0.9, "depressed": 1.0, "down": 0.7,
-        "miserable": 0.9, "crying": 0.9, "cry": 0.8, "tears": 0.8,
-        "lonely": 0.8, "alone": 0.7, "hopeless": 1.0, "empty": 0.8,
-        "numb": 0.8, "worthless": 1.0, "helpless": 0.9, "grief": 0.9,
-        "loss": 0.7, "heartbroken": 0.9, "gloomy": 0.8, "despair": 1.0,
-        "hurt": 0.7, "pain": 0.7, "suffer": 0.8, "broken": 0.8,
-    },
-    "anxious": {
-        "anxious": 1.0, "anxiety": 1.0, "worried": 0.9, "nervous": 0.9,
-        "scared": 0.8, "fear": 0.9, "panic": 1.0, "stressed": 0.9,
-        "stress": 0.8, "overwhelmed": 0.9, "tense": 0.8, "restless": 0.7,
-        "uneasy": 0.7, "dread": 0.9, "terrified": 1.0, "frightened": 0.9,
-        "phobia": 0.9, "obsess": 0.8, "overthink": 0.8, "paranoid": 0.8,
-        "worry": 0.8, "trembling": 0.7, "shaking": 0.7, "sweating": 0.6,
-    },
-    "angry": {
-        "angry": 1.0, "anger": 1.0, "furious": 1.0, "mad": 0.8,
-        "frustrated": 0.8, "irritated": 0.7, "annoyed": 0.7, "rage": 1.0,
-        "hate": 0.9, "hostile": 0.9, "aggressive": 0.8, "bitter": 0.7,
-        "resentful": 0.8, "outraged": 0.9, "livid": 1.0, "enraged": 1.0,
-        "violent": 0.9, "fight": 0.6, "yell": 0.7, "scream": 0.7,
-    },
-    "neutral": {
-        "okay": 0.6, "fine": 0.5, "alright": 0.5, "normal": 0.6,
-        "average": 0.5, "nothing": 0.4, "regular": 0.5, "usual": 0.5,
-        "moderate": 0.5, "calm": 0.6, "stable": 0.6, "balanced": 0.6,
-    },
+DEFAULT_N_CLUSTERS = 5
+MIN_SAMPLES_FOR_CLUSTERING = 10
+TOP_TERMS_PER_CLUSTER = 10
+
+# Seed emotion terms for auto-labelling clusters
+EMOTION_SEED_TERMS: Dict[str, List[str]] = {
+    "distress": [
+        "sad", "depressed", "hopeless", "crying", "lonely", "empty",
+        "worthless", "broken", "miserable", "pain", "hurt", "suffer",
+    ],
+    "anxiety": [
+        "anxious", "worried", "nervous", "scared", "panic", "stress",
+        "overwhelmed", "fear", "restless", "tense", "dread", "overthink",
+    ],
+    "anger": [
+        "angry", "frustrated", "furious", "mad", "hate", "irritated",
+        "annoyed", "rage", "hostile", "resentful", "aggressive",
+    ],
+    "positive": [
+        "happy", "great", "excited", "love", "grateful", "proud",
+        "confident", "amazing", "wonderful", "enjoy", "fun", "hope",
+    ],
+    "neutral": [
+        "okay", "fine", "normal", "usual", "regular", "nothing",
+        "average", "routine", "class", "school", "day", "today",
+    ],
 }
 
-# Negation words that flip sentiment
-NEGATION_WORDS = {
-    "not", "no", "never", "neither", "nobody", "nothing",
-    "nowhere", "nor", "cannot", "can't", "don't", "doesn't",
-    "didn't", "won't", "wouldn't", "shouldn't", "couldn't",
-    "isn't", "aren't", "wasn't", "weren't", "hardly", "barely",
-    "scarcely", "seldom", "rarely",
-}
 
-# Intensifier words that boost scores
-INTENSIFIERS = {
-    "very": 1.3, "really": 1.3, "extremely": 1.5, "so": 1.2,
-    "incredibly": 1.4, "absolutely": 1.4, "totally": 1.3,
-    "completely": 1.4, "deeply": 1.3, "severely": 1.4,
-    "terribly": 1.3, "awfully": 1.3, "immensely": 1.4,
-}
+# ── Data Classes ─────────────────────────────────────────────────
+
+
+@dataclass
+class EmotionCluster:
+    """Description of a discovered emotion cluster."""
+    cluster_id: int
+    label: str                              # auto-generated semantic label
+    top_terms: List[str]                    # most representative terms
+    size: int                               # number of documents in cluster
+    centroid_norm: float                    # L2 norm of centroid
+    seed_category_scores: Dict[str, float]  # similarity to each seed category
 
 
 @dataclass
 class EmotionResult:
-    """Result of emotion detection analysis."""
-    predicted_emotion: str
+    """Result of emotion detection for a single text."""
+    predicted_cluster: int
+    cluster_label: str
     confidence_score: float
-    emotion_scores: Dict[str, float]
+    cluster_distances: Dict[int, float]     # distance to each centroid
     model_version: str = ""
-    word_matches: Dict[str, List[str]] = field(default_factory=dict)
+    top_terms: List[str] = field(default_factory=list)
 
 
-def _tokenize(text: str) -> List[str]:
-    """Tokenize text into lowercase words."""
-    text = text.lower()
-    text = re.sub(r"[^a-z\s']", " ", text)
-    return text.split()
+# ── Emotion Clustering Engine ────────────────────────────────────
 
 
-def _check_negation_window(tokens: List[str], index: int, window: int = 3) -> bool:
-    """Check if a negation word appears within a window before the given index."""
-    start = max(0, index - window)
-    for i in range(start, index):
-        if tokens[i] in NEGATION_WORDS:
-            return True
-    return False
+class EmotionClusterEngine:
+    """K-Means based emotion cluster discovery.
+
+    Operates in two phases:
+      1. fit():     Cluster a corpus → discover emotion groups
+      2. predict(): Assign new text to nearest cluster
+
+    Cluster labels are auto-generated by comparing each centroid's
+    top TF-IDF terms against seed emotion vocabularies.
+    """
+
+    def __init__(self, n_clusters: int = DEFAULT_N_CLUSTERS) -> None:
+        self.n_clusters = n_clusters
+        self._kmeans: Optional[MiniBatchKMeans] = None
+        self._clusters: List[EmotionCluster] = []
+        self._is_fitted = False
+        self._version = "emotion-v3.0.0-kmeans"
+
+    @property
+    def is_fitted(self) -> bool:
+        return self._is_fitted
+
+    @property
+    def clusters(self) -> List[EmotionCluster]:
+        return self._clusters
+
+    def fit(self, texts: List[str]) -> "EmotionClusterEngine":
+        """Fit K-Means clusters on a corpus of student text.
+
+        Args:
+            texts: Raw text documents (journals, check-ins, etc.)
+
+        Returns:
+            Self (for chaining).
+        """
+        if len(texts) < MIN_SAMPLES_FOR_CLUSTERING:
+            logger.warning(
+                f"Not enough samples for clustering ({len(texts)} < "
+                f"{MIN_SAMPLES_FOR_CLUSTERING}). Using fallback."
+            )
+            self._setup_fallback()
+            return self
+
+        engine = get_embedding_engine()
+        if not engine.is_fitted:
+            engine.fit(texts)
+
+        X = engine.transform(texts)
+
+        # Auto-select K using Silhouette score for optimization
+        actual_k = self._select_optimal_k(X)
+
+        self._kmeans = MiniBatchKMeans(
+            n_clusters=actual_k,
+            init="k-means++",
+            n_init=10,
+            max_iter=300,
+            batch_size=1024,
+            random_state=42,
+        )
+        self._kmeans.fit(X)
+
+        # Compute silhouette score
+        if len(texts) > actual_k:
+            sil_score = silhouette_score(X, self._kmeans.labels_, metric="cosine")
+        else:
+            sil_score = 0.0
+
+        # Auto-label clusters
+        self._clusters = self._label_clusters(engine)
+        self._is_fitted = True
+
+        logger.info(
+            f"EmotionClusterEngine fitted: k={actual_k}, "
+            f"silhouette={sil_score:.4f}, "
+            f"samples={len(texts)}"
+        )
+        self.save()
+
+        return self
+
+    def predict(self, text: Optional[str]) -> EmotionResult:
+        """Assign a text to the nearest emotion cluster.
+
+        Args:
+            text: Raw text input.
+
+        Returns:
+            EmotionResult with cluster assignment and confidence.
+        """
+        if not text or not text.strip():
+            return EmotionResult(
+                predicted_cluster=0,
+                cluster_label="neutral",
+                confidence_score=0.5,
+                cluster_distances={},
+                model_version=self._version,
+            )
+
+        if not self._is_fitted:
+            return self._fallback_predict(text)
+
+        engine = get_embedding_engine()
+        X = engine.transform([text])
+
+        # Get distances to all centroids
+        distances = cosine_distances(X, self._kmeans.cluster_centers_)[0]
+        cluster_id = int(np.argmin(distances))
+
+        # Confidence: inverse of distance, normalised
+        min_dist = distances[cluster_id]
+        max_dist = max(distances)
+        confidence = 1.0 - (min_dist / max_dist) if max_dist > 0 else 0.5
+        confidence = max(0.1, min(1.0, confidence))
+
+        # Get cluster info
+        cluster_info = self._clusters[cluster_id] if cluster_id < len(self._clusters) else None
+        label = cluster_info.label if cluster_info else f"cluster_{cluster_id}"
+        top_terms = cluster_info.top_terms if cluster_info else []
+
+        return EmotionResult(
+            predicted_cluster=cluster_id,
+            cluster_label=label,
+            confidence_score=round(confidence, 4),
+            cluster_distances={i: round(float(d), 4) for i, d in enumerate(distances)},
+            model_version=self._version,
+            top_terms=top_terms[:5],
+        )
+
+    def _label_clusters(self, engine) -> List[EmotionCluster]:
+        """Auto-label each cluster based on top TF-IDF terms and seed matching."""
+        feature_names = engine.get_feature_names()
+        clusters = []
+
+        for i in range(self._kmeans.n_clusters):
+            centroid = self._kmeans.cluster_centers_[i]
+
+            # Top terms by centroid weight
+            top_indices = centroid.argsort()[-TOP_TERMS_PER_CLUSTER:][::-1]
+            top_terms = [feature_names[idx] for idx in top_indices if idx < len(feature_names)]
+
+            # Score against seed categories
+            seed_scores = self._score_seed_categories(top_terms)
+            best_category = max(seed_scores, key=seed_scores.get)
+
+            # Count documents in cluster
+            cluster_mask = self._kmeans.labels_ == i
+            size = int(cluster_mask.sum())
+
+            # Generate label
+            label = f"{best_category}_{i}"
+
+            clusters.append(EmotionCluster(
+                cluster_id=i,
+                label=label,
+                top_terms=top_terms,
+                size=size,
+                centroid_norm=float(np.linalg.norm(centroid)),
+                seed_category_scores=seed_scores,
+            ))
+
+        return clusters
+
+    def _select_optimal_k(self, X: np.ndarray) -> int:
+        """Select optimal number of clusters using Silhouette Score."""
+        max_k = min(15, X.shape[0] // 5)
+        max_k = max(3, max_k)
+
+        best_k = self.n_clusters
+        best_score = -1.0
+
+        # Optimization wrapper
+        for k in range(2, max_k + 1):
+            kmeans = MiniBatchKMeans(
+                n_clusters=k,
+                init="k-means++",
+                n_init=3,
+                max_iter=100,
+                batch_size=1024,
+                random_state=42
+            )
+            labels = kmeans.fit_predict(X)
+            if len(set(labels)) > 1:
+                score = silhouette_score(X, labels, metric="cosine")
+                if score > best_score:
+                    best_score = score
+                    best_k = k
+
+        logger.info(f"Emotion optimal K auto-selected: {best_k} (Silhouette={best_score:.4f})")
+        return best_k
+
+    def _score_seed_categories(self, terms: List[str]) -> Dict[str, float]:
+        """Score a set of terms against seed emotion vocabularies."""
+        scores = {}
+        for category, seeds in EMOTION_SEED_TERMS.items():
+            seed_set = set(seeds)
+            # Count how many top terms overlap with each seed category
+            overlap = sum(1 for t in terms if t in seed_set)
+            # Also check for partial matches (e.g. "stressed" matches "stress")
+            partial = sum(
+                1 for t in terms
+                for s in seed_set
+                if (s in t or t in s) and t not in seed_set
+            )
+            scores[category] = overlap + partial * 0.5
+
+        # Normalise to 0-1
+        total = sum(scores.values())
+        if total > 0:
+            scores = {k: round(v / total, 4) for k, v in scores.items()}
+        else:
+            # No matches — default to neutral
+            scores = {k: 0.2 for k in EMOTION_SEED_TERMS}
+
+        return scores
+
+    def _setup_fallback(self) -> None:
+        """Setup a minimal fallback when not enough data for clustering."""
+        self._is_fitted = True
+        self._clusters = [
+            EmotionCluster(
+                cluster_id=0,
+                label="neutral_0",
+                top_terms=["day", "school", "okay"],
+                size=0,
+                centroid_norm=0.0,
+                seed_category_scores={"neutral": 1.0},
+            )
+        ]
+        self._version = "emotion-v3.0.0-fallback"
+
+    def _fallback_predict(self, text: str) -> EmotionResult:
+        """Simple keyword-based fallback when clustering is not fitted."""
+        text_lower = text.lower()
+
+        # Quick seed term check
+        best_cat = "neutral"
+        best_score = 0
+
+        for category, seeds in EMOTION_SEED_TERMS.items():
+            score = sum(1 for s in seeds if s in text_lower)
+            if score > best_score:
+                best_score = score
+                best_cat = category
+
+        return EmotionResult(
+            predicted_cluster=0,
+            cluster_label=best_cat,
+            confidence_score=min(0.3 + best_score * 0.1, 0.8),
+            cluster_distances={},
+            model_version="emotion-v3.0.0-fallback",
+        )
+
+    def get_config(self) -> Dict:
+        """Return engine config for registry."""
+        return {
+            "type": "minibatch_kmeans_clustering",
+            "n_clusters": self.n_clusters,
+            "is_fitted": self._is_fitted,
+            "num_clusters_actual": len(self._clusters),
+            "version": self._version,
+        }
+
+    def save(self) -> None:
+        """Save the fitted model to disk."""
+        if not self._is_fitted:
+            return
+        os.makedirs(settings.MODEL_SAVE_DIR, exist_ok=True)
+        path = os.path.join(settings.MODEL_SAVE_DIR, "emotion_detection.joblib")
+        joblib.dump(self, path)
+        logger.info(f"EmotionClusterEngine saved to {path}")
+
+    @classmethod
+    def load(cls) -> Optional["EmotionClusterEngine"]:
+        """Load the fitted model from disk."""
+        path = os.path.join(settings.MODEL_SAVE_DIR, "emotion_detection.joblib")
+        if os.path.exists(path):
+            try:
+                engine = joblib.load(path)
+                logger.info(f"EmotionClusterEngine loaded from {path}")
+                return engine
+            except Exception as e:
+                logger.error(f"Failed to load EmotionClusterEngine: {e}")
+        return None
 
 
-def _get_intensifier(tokens: List[str], index: int) -> float:
-    """Check if an intensifier word precedes the given index."""
-    if index > 0 and tokens[index - 1] in INTENSIFIERS:
-        return INTENSIFIERS[tokens[index - 1]]
-    return 1.0
+# ── Singleton ────────────────────────────────────────────────────
+
+_engine: Optional[EmotionClusterEngine] = None
+
+
+def get_emotion_engine() -> EmotionClusterEngine:
+    """Get or create the global EmotionClusterEngine."""
+    global _engine
+    if _engine is None:
+        _engine = EmotionClusterEngine.load()
+        if _engine is None:
+            _engine = EmotionClusterEngine()
+    return _engine
 
 
 def detect_emotion(text: Optional[str]) -> EmotionResult:
-    """Detect the primary emotion from text input.
+    """Public API — detect emotion cluster for a text input.
 
-    Uses keyword-matching with negation handling and intensifiers
-    to score text against emotion lexicons.
-
-    Args:
-        text: Input text to analyze. Can be journal entry, check-in notes, etc.
-
-    Returns:
-        EmotionResult with predicted emotion, confidence, and per-emotion scores.
+    Drop-in replacement for the old lexicon-based detect_emotion().
     """
-    version = _get_model_version()
-
-    if not text or not text.strip():
-        return EmotionResult(
-            predicted_emotion="neutral",
-            confidence_score=0.5,
-            emotion_scores={"neutral": 0.5},
-            model_version=version,
-        )
-
-    tokens = _tokenize(text)
-    if not tokens:
-        return EmotionResult(
-            predicted_emotion="neutral",
-            confidence_score=0.5,
-            emotion_scores={"neutral": 0.5},
-            model_version=version,
-        )
-
-    emotion_scores: Dict[str, float] = {emotion: 0.0 for emotion in EMOTION_LEXICONS}
-    word_matches: Dict[str, List[str]] = {emotion: [] for emotion in EMOTION_LEXICONS}
-    total_matches = 0
-
-    for i, token in enumerate(tokens):
-        for emotion, lexicon in EMOTION_LEXICONS.items():
-            if token in lexicon:
-                base_weight = lexicon[token]
-                intensifier = _get_intensifier(tokens, i)
-                is_negated = _check_negation_window(tokens, i)
-
-                if is_negated:
-                    # Negation: reduce this emotion, slightly boost opposite
-                    score = -base_weight * 0.5 * intensifier
-                else:
-                    score = base_weight * intensifier
-
-                emotion_scores[emotion] += score
-                word_matches[emotion].append(token)
-                total_matches += 1
-
-    # If no matches, return neutral
-    if total_matches == 0:
-        return EmotionResult(
-            predicted_emotion="neutral",
-            confidence_score=0.4,
-            emotion_scores={"neutral": 0.4},
-            model_version=version,
-        )
-
-    # Normalize scores to 0-1 range
-    max_raw = max(abs(v) for v in emotion_scores.values()) if emotion_scores else 1.0
-    if max_raw > 0:
-        normalized = {
-            k: max(0.0, min(1.0, (v / max_raw + 1) / 2))
-            for k, v in emotion_scores.items()
-        }
-    else:
-        normalized = {k: 0.5 for k in emotion_scores}
-
-    # Find predicted emotion
-    predicted = max(normalized, key=normalized.get)
-    confidence = normalized[predicted]
-
-    # Adjust confidence based on match density
-    match_density = total_matches / max(len(tokens), 1)
-    confidence = min(1.0, confidence * (0.5 + match_density))
-    confidence = round(max(0.1, confidence), 4)
-
-    logger.debug(
-        f"Emotion detected: {predicted} (conf={confidence}), "
-        f"matches={total_matches}/{len(tokens)} tokens"
-    )
-
-    return EmotionResult(
-        predicted_emotion=predicted,
-        confidence_score=confidence,
-        emotion_scores={k: round(v, 4) for k, v in normalized.items()},
-        model_version=version,
-        word_matches={k: v for k, v in word_matches.items() if v},
-    )
+    engine = get_emotion_engine()
+    return engine.predict(text)

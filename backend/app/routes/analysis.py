@@ -51,7 +51,7 @@ async def analyze_text(
     result = await analyze_text_standalone(payload.text_input)
     logger.info(
         f"Standalone analysis by user={current_user.id}: "
-        f"emotion={result['emotion']['predicted_emotion']}"
+        f"emotion={result['emotion']['cluster_label']}"
     )
     return EmotionAnalyzeResponse(**result)
 
