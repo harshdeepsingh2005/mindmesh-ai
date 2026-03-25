@@ -428,6 +428,13 @@ async def evaluate_live_text(
         
         emotion_res = emotion_engine.predict(body.text)
         topic_res = topic_engine.predict(body.text)
+
+        # Get topic top terms from the engine's topic list
+        topic_top_terms = []
+        if hasattr(topic_engine, '_topics') and topic_res.dominant_topic < len(topic_engine._topics):
+            topic_top_terms = topic_engine._topics[topic_res.dominant_topic].top_terms
+        elif topic_res.topic_label and topic_res.topic_label != "unknown":
+            topic_top_terms = topic_res.topic_label.replace("_", " ").split()[:5]
         
         return LiveEvaluationResponse(
             emotion_cluster=emotion_res.cluster_label,
@@ -435,7 +442,7 @@ async def evaluate_live_text(
             emotion_top_terms=emotion_res.top_terms,
             topic_cluster=topic_res.topic_label,
             topic_confidence=topic_res.confidence,
-            topic_top_terms=topic_res.top_terms,
+            topic_top_terms=topic_top_terms,
         )
     except Exception as e:
         logger.error(f"Live evaluation error: {e}")
