@@ -30,6 +30,9 @@ from ..services.training_pipeline import (
     generate_synthetic_features,
     TrainingResult,
 )
+from ..services.emotion_detection import get_emotion_engine
+from ..services.topic_discovery import get_topic_engine
+from ..services.anomaly_detection import get_anomaly_engine, BehavioralFeatureVector
 from ..logging_config import logger
 
 router = APIRouter()
@@ -90,6 +93,17 @@ class ComparisonResponse(BaseModel):
     version_b: str
     metric_deltas: Dict[str, float]
     winner: str
+
+class LiveEvaluationRequest(BaseModel):
+    text: str = Field(..., description="Text to evaluate for emotion and topics")
+
+class LiveEvaluationResponse(BaseModel):
+    emotion_cluster: str
+    emotion_confidence: float
+    emotion_top_terms: List[str]
+    topic_cluster: str
+    topic_confidence: float
+    topic_top_terms: List[str]
 
 
 # ─── Model Registry Endpoints ────────────────────────────────────
@@ -199,65 +213,74 @@ async def trigger_training(
 
     Admin only.
     """
-    results: List[TrainingResult] = []
+    try:
+        results: List[TrainingResult] = []
 
-    valid_models = {
-        "text_embeddings", "emotion_detection", "anomaly_detection",
-        "student_clustering", "topic_discovery",
-    }
+        valid_models = {
+            "text_embeddings", "emotion_detection", "anomaly_detection",
+            "student_clustering", "topic_discovery",
+        }
 
-    if body.model_name is None or body.model_name == "all":
-        corpus = generate_synthetic_corpus(n=body.corpus_size)
-        features = generate_synthetic_features(n=body.feature_size)
-        results = await run_full_training_pipeline(
-            corpus=corpus, features=features
-        )
-    elif body.model_name == "text_embeddings":
-        corpus = generate_synthetic_corpus(n=body.corpus_size)
-        result = await train_text_embeddings(corpus=corpus)
-        results.append(result)
-    elif body.model_name == "emotion_detection":
-        corpus = generate_synthetic_corpus(n=body.corpus_size)
-        result = await train_emotion_clusters(corpus=corpus)
-        results.append(result)
-    elif body.model_name == "anomaly_detection":
-        features = generate_synthetic_features(n=body.feature_size)
-        result = await train_anomaly_detection(features=features)
-        results.append(result)
-    elif body.model_name == "student_clustering":
-        features = generate_synthetic_features(n=body.feature_size)
-        result = await train_student_clustering(features=features)
-        results.append(result)
-    elif body.model_name == "topic_discovery":
-        corpus = generate_synthetic_corpus(n=body.corpus_size)
-        result = await train_topic_discovery(corpus=corpus)
-        results.append(result)
-    else:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Unknown model: {body.model_name}. "
-                   f"Valid options: {', '.join(valid_models)} or 'all'.",
-        )
-
-    logger.info(
-        f"Training triggered by user={current_user.id}: "
-        f"{len(results)} models trained"
-    )
-
-    return TrainingPipelineResponse(
-        results=[
-            TrainingResultResponse(
-                model_name=r.model_name,
-                new_version=r.new_version,
-                training_samples=r.training_samples,
-                metrics=r.metrics,
-                promoted=r.promoted,
-                duration_seconds=r.duration_seconds,
+        if body.model_name is None or body.model_name == "all":
+            corpus = generate_synthetic_corpus(n=body.corpus_size)
+            features = generate_synthetic_features(n=body.feature_size)
+            results = await run_full_training_pipeline(
+                corpus=corpus, features=features
             )
-            for r in results
-        ],
-        total_models=len(results),
-    )
+        elif body.model_name == "text_embeddings":
+            corpus = generate_synthetic_corpus(n=body.corpus_size)
+            result = await train_text_embeddings(corpus=corpus)
+            results.append(result)
+        elif body.model_name == "emotion_detection":
+            corpus = generate_synthetic_corpus(n=body.corpus_size)
+            result = await train_emotion_clusters(corpus=corpus)
+            results.append(result)
+        elif body.model_name == "anomaly_detection":
+            features = generate_synthetic_features(n=body.feature_size)
+            result = await train_anomaly_detection(features=features)
+            results.append(result)
+        elif body.model_name == "student_clustering":
+            features = generate_synthetic_features(n=body.feature_size)
+            result = await train_student_clustering(features=features)
+            results.append(result)
+        elif body.model_name == "topic_discovery":
+            corpus = generate_synthetic_corpus(n=body.corpus_size)
+            result = await train_topic_discovery(corpus=corpus)
+            results.append(result)
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Unknown model: {body.model_name}. "
+                       f"Valid options: {', '.join(valid_models)} or 'all'.",
+            )
+
+        logger.info(
+            f"Training triggered by user={current_user.id}: "
+            f"{len(results)} models trained"
+        )
+
+        return TrainingPipelineResponse(
+            results=[
+                TrainingResultResponse(
+                    model_name=r.model_name,
+                    new_version=r.new_version,
+                    training_samples=r.training_samples,
+                    metrics=r.metrics,
+                    promoted=r.promoted,
+                    duration_seconds=r.duration_seconds,
+                )
+                for r in results
+            ],
+            total_models=len(results),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Training pipeline error: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Training failed: {str(e)}",
+        )
 
 
 # ─── Comparison Endpoint ────────────────────────────────────────
@@ -388,3 +411,35 @@ async def retire_model(
         activated_at=model.activated_at.isoformat() if model.activated_at else None,
         retired_at=model.retired_at.isoformat() if model.retired_at else None,
     )
+
+@router.post(
+    "/evaluate",
+    response_model=LiveEvaluationResponse,
+    summary="Live text evaluation against Unsupervised Models",
+)
+async def evaluate_live_text(
+    body: LiveEvaluationRequest,
+    current_user: User = Depends(require_roles(["admin", "teacher"])),
+) -> LiveEvaluationResponse:
+    """Run live text through the active Engine singletons to fetch topics/emotions."""
+    try:
+        emotion_engine = get_emotion_engine()
+        topic_engine = get_topic_engine()
+        
+        emotion_res = emotion_engine.predict(body.text)
+        topic_res = topic_engine.predict(body.text)
+        
+        return LiveEvaluationResponse(
+            emotion_cluster=emotion_res.cluster_label,
+            emotion_confidence=emotion_res.confidence_score,
+            emotion_top_terms=emotion_res.top_terms,
+            topic_cluster=topic_res.topic_label,
+            topic_confidence=topic_res.confidence,
+            topic_top_terms=topic_res.top_terms,
+        )
+    except Exception as e:
+        logger.error(f"Live evaluation error: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Evaluation failed — models may not be trained yet. Train models first. ({str(e)})",
+        )

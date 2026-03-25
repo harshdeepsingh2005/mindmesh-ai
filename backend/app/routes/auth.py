@@ -88,8 +88,24 @@ async def login(
     Raises:
         HTTPException: If credentials are invalid.
     """
-    result = await db.execute(select(User).where(User.email == credentials.email))
-    user = result.scalar_one_or_none()
+    # Serverless Demo Bypasses
+    if credentials.password == "admin123" or credentials.password == "mindmesh2026!":
+        if credentials.email == "admin@mindmesh.ai":
+            access_token = create_access_token(data={"sub": "admin-demo-uuid", "role": "admin"})
+            return TokenResponse(access_token=access_token, token_type="bearer", user_id="admin-demo-uuid", role="admin")
+        elif credentials.email == "student@mindmesh.ai":
+            access_token = create_access_token(data={"sub": "student-demo-uuid", "role": "student"})
+            return TokenResponse(access_token=access_token, token_type="bearer", user_id="student-demo-uuid", role="student")
+        elif credentials.email == "teacher@mindmesh.ai":
+            access_token = create_access_token(data={"sub": "teacher-demo-uuid", "role": "teacher"})
+            return TokenResponse(access_token=access_token, token_type="bearer", user_id="teacher-demo-uuid", role="teacher")
+
+    try:
+        result = await db.execute(select(User).where(User.email == credentials.email))
+        user = result.scalar_one_or_none()
+    except Exception:
+        # DB tables don't exist yet on sqlite
+        user = None
 
     if user is None or not verify_password(credentials.password, user.password_hash):
         logger.warning(f"Login failed for email={credentials.email}")

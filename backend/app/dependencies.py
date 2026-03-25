@@ -47,8 +47,16 @@ async def get_current_user(
         logger.warning("JWT token missing 'sub' claim.")
         raise credentials_exception
 
-    result = await db.execute(select(User).where(User.id == user_id))
-    user = result.scalar_one_or_none()
+    # Serverless Mock Users
+    if user_id in ("admin-demo-uuid", "student-demo-uuid", "teacher-demo-uuid"):
+        role = payload.get("role", "student")
+        return User(id=user_id, email=f"{role}@mindmesh.ai", name=f"{role.capitalize()} Demo", role=role)
+
+    try:
+        result = await db.execute(select(User).where(User.id == user_id))
+        user = result.scalar_one_or_none()
+    except Exception:
+        user = None
 
     if user is None:
         logger.warning(f"User not found for id={user_id}")

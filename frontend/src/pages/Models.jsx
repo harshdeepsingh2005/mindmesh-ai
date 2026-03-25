@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { motion } from 'framer-motion'
-import { Brain, Cpu, Play, CheckCircle, Clock, Zap, BarChart3, Network, Layers } from 'lucide-react'
+import { Brain, Cpu, Play, CheckCircle, Clock, Zap, BarChart3, Network, Layers, Sparkles } from 'lucide-react'
 import { api } from '../lib/api'
 
 const MODEL_ICONS = {
@@ -78,6 +78,10 @@ export default function Models() {
   const [models, setModels] = useState(MOCK_MODELS)
   const [training, setTraining] = useState(false)
   const [trainResult, setTrainResult] = useState(null)
+  
+  const [sandboxText, setSandboxText] = useState('')
+  const [evaluating, setEvaluating] = useState(false)
+  const [evalResult, setEvalResult] = useState(null)
 
   useEffect(() => {
     (async () => {
@@ -104,6 +108,20 @@ export default function Models() {
       setTrainResult({ error: err.message })
     } finally {
       setTraining(false)
+    }
+  }
+
+  const handleEvaluate = async () => {
+    if (!sandboxText.trim()) return;
+    setEvaluating(true);
+    setEvalResult(null);
+    try {
+      const res = await api.evaluateLiveText(sandboxText);
+      setEvalResult(res);
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setEvaluating(false);
     }
   }
 
@@ -175,6 +193,58 @@ export default function Models() {
             )
           ))}
         </div>
+      </motion.div>
+
+      {/* Model Sandbox */}
+      <motion.div className="card" {...anim} style={{ marginBottom: 'var(--space-xl)', padding: 'var(--space-xl)', borderTop: '3px solid #8b5cf6' }}>
+        <div className="card-header" style={{ marginBottom: 'var(--space-md)' }}>
+          <span className="card-title" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <Sparkles size={16} color="#8b5cf6" /> Live Model Evaluation Sandbox
+          </span>
+        </div>
+        <p style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 'var(--space-md)' }}>
+          Test your trained Unsupervised NLP models instantly. Type a mock student journal entry to see what emotion clusters and topics the AI discovers based on its mathematical associations.
+        </p>
+        <div style={{ display: 'flex', gap: 12, marginBottom: 'var(--space-md)' }}>
+          <input
+            type="text"
+            className="input-field"
+            style={{ flex: 1 }}
+            placeholder="e.g. I'm feeling really stressed about my math exam tomorrow and can't sleep..."
+            value={sandboxText}
+            onChange={(e) => setSandboxText(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && handleEvaluate()}
+          />
+          <button className="btn btn-primary" style={{ background: '#8b5cf6' }} onClick={handleEvaluate} disabled={evaluating}>
+            {evaluating ? 'Evaluating...' : 'Evaluate Text'}
+          </button>
+        </div>
+        
+        {evalResult && (
+          <motion.div initial={{ opacity: 0, scale: 0.98 }} animate={{ opacity: 1, scale: 1 }} style={{
+            background: 'var(--bg-tertiary)', padding: 'var(--space-lg)', borderRadius: 'var(--radius-md)',
+            display: 'flex', gap: 'var(--space-xl)', border: '1px solid var(--border-subtle)'
+          }}>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', color: 'var(--text-muted)', marginBottom: 8 }}>Emotion Cluster Hit</div>
+              <div style={{ fontSize: 18, fontFamily: 'var(--font-mono)', fontWeight: 600, color: '#8b5cf6', marginBottom: 4 }}>
+                {evalResult.emotion_cluster} <span style={{ fontSize: 12, color: 'var(--text-muted)', fontWeight: 400 }}>(Conf: {evalResult.emotion_confidence.toFixed(2)})</span>
+              </div>
+              <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+                <strong>Top Cluster Terms: </strong> {evalResult.emotion_top_terms.join(', ')}
+              </div>
+            </div>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', color: 'var(--text-muted)', marginBottom: 8 }}>Topic Discovery Hit</div>
+              <div style={{ fontSize: 18, fontFamily: 'var(--font-mono)', fontWeight: 600, color: '#f59e0b', marginBottom: 4 }}>
+                {evalResult.topic_cluster} <span style={{ fontSize: 12, color: 'var(--text-muted)', fontWeight: 400 }}>(Conf: {evalResult.topic_confidence.toFixed(2)})</span>
+              </div>
+              <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+                <strong>Top Topic Terms: </strong> {evalResult.topic_top_terms.join(', ')}
+              </div>
+            </div>
+          </motion.div>
+        )}
       </motion.div>
 
       {/* Model Cards Grid */}

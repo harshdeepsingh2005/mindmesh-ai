@@ -64,54 +64,73 @@ async def get_dashboard(
     Combines: overview, risk distribution, emotion distribution,
     emotion trend, alert summary, and top at-risk students.
     """
-    overview = await analytics_service.get_overview_stats(db, days=days)
-    risk_dist = await analytics_service.get_risk_distribution(db)
-    emotion_dist = await analytics_service.get_emotion_distribution(db, days=days)
-    emotion_trend = await analytics_service.get_emotion_trend_timeseries(db, days=days)
-    alert_summary = await analytics_service.get_alert_summary(db, days=days)
-    at_risk, _ = await analytics_service.get_student_summaries(
-        db, days=days, risk_level_filter="high", limit=10
-    )
+    try:
+        overview = await analytics_service.get_overview_stats(db, days=days)
+        risk_dist = await analytics_service.get_risk_distribution(db)
+        emotion_dist = await analytics_service.get_emotion_distribution(db, days=days)
+        emotion_trend = await analytics_service.get_emotion_trend_timeseries(db, days=days)
+        alert_summary = await analytics_service.get_alert_summary(db, days=days)
+        at_risk, _ = await analytics_service.get_student_summaries(
+            db, days=days, risk_level_filter="high", limit=10
+        )
 
-    overview_resp = OverviewStatsResponse(**overview.__dict__)
+        overview_resp = OverviewStatsResponse(**overview.__dict__)
 
-    risk_buckets = [RiskBucketResponse(**b.__dict__) for b in risk_dist]
-    risk_total = sum(b.count for b in risk_dist)
-    risk_resp = RiskDistributionResponse(buckets=risk_buckets, total_assessed=risk_total)
+        risk_buckets = [RiskBucketResponse(**b.__dict__) for b in risk_dist]
+        risk_total = sum(b.count for b in risk_dist)
+        risk_resp = RiskDistributionResponse(buckets=risk_buckets, total_assessed=risk_total)
 
-    emo_items = [EmotionDistributionItem(**e.__dict__) for e in emotion_dist]
-    emo_resp = EmotionDistributionResponse(
-        period_days=days,
-        distribution=emo_items,
-        total_analyses=sum(e.count for e in emotion_dist),
-    )
+        emo_items = [EmotionDistributionItem(**e.__dict__) for e in emotion_dist]
+        emo_resp = EmotionDistributionResponse(
+            period_days=days,
+            distribution=emo_items,
+            total_analyses=sum(e.count for e in emotion_dist),
+        )
 
-    trend_points = [TimeSeriesPointResponse(**p.__dict__) for p in emotion_trend]
-    trend_resp = TimeSeriesResponse(
-        metric="emotion_score",
-        period_days=days,
-        data_points=trend_points,
-        total_points=len(trend_points),
-    )
+        trend_points = [TimeSeriesPointResponse(**p.__dict__) for p in emotion_trend]
+        trend_resp = TimeSeriesResponse(
+            metric="emotion_score",
+            period_days=days,
+            data_points=trend_points,
+            total_points=len(trend_points),
+        )
 
-    alert_resp = AlertSummaryResponse(
-        period_days=days,
-        total_alerts=alert_summary["total_alerts"],
-        by_status=alert_summary["by_status"],
-        by_type=alert_summary["by_type"],
-        daily_trend=[AlertDailyTrend(**d) for d in alert_summary["daily_trend"]],
-    )
+        alert_resp = AlertSummaryResponse(
+            period_days=days,
+            total_alerts=alert_summary["total_alerts"],
+            by_status=alert_summary["by_status"],
+            by_type=alert_summary["by_type"],
+            daily_trend=[AlertDailyTrend(**d) for d in alert_summary["daily_trend"]],
+        )
 
-    at_risk_resp = [StudentSummaryResponse(**s.__dict__) for s in at_risk]
+        at_risk_resp = [StudentSummaryResponse(**s.__dict__) for s in at_risk]
 
-    return DashboardResponse(
-        overview=overview_resp,
-        risk_distribution=risk_resp,
-        emotion_distribution=emo_resp,
-        emotion_trend=trend_resp,
-        alert_summary=alert_resp,
-        at_risk_students=at_risk_resp,
-    )
+        return DashboardResponse(
+            overview=overview_resp,
+            risk_distribution=risk_resp,
+            emotion_distribution=emo_resp,
+            emotion_trend=trend_resp,
+            alert_summary=alert_resp,
+            at_risk_students=at_risk_resp,
+        )
+    except Exception as e:
+        logger.warning(f"Dashboard query failed (likely no DB tables): {e}")
+        return DashboardResponse(
+            overview=OverviewStatsResponse(
+                total_students=0, total_records=0, total_checkins=0,
+                total_journals=0, total_risk_assessments=0,
+                open_alerts=0, acknowledged_alerts=0,
+                high_risk_students=0, medium_risk_students=0,
+                low_risk_students=0, unassessed_students=0,
+                avg_risk_score=0.0, avg_emotion_score=0.0, avg_sentiment_score=0.0,
+                period_days=days,
+            ),
+            risk_distribution=RiskDistributionResponse(buckets=[], total_assessed=0),
+            emotion_distribution=EmotionDistributionResponse(period_days=days, distribution=[], total_analyses=0),
+            emotion_trend=TimeSeriesResponse(metric="emotion_score", period_days=days, data_points=[], total_points=0),
+            alert_summary=AlertSummaryResponse(period_days=days, total_alerts=0, by_status={}, by_type={}, daily_trend=[]),
+            at_risk_students=[],
+        )
 
 
 # ─── Overview Stats ──────────────────────────────────────────────
@@ -128,8 +147,19 @@ async def get_overview(
     db: AsyncSession = Depends(get_db),
 ):
     """Top-level numerical summary for the dashboard header cards."""
-    stats = await analytics_service.get_overview_stats(db, days=days)
-    return OverviewStatsResponse(**stats.__dict__)
+    try:
+        stats = await analytics_service.get_overview_stats(db, days=days)
+        return OverviewStatsResponse(**stats.__dict__)
+    except Exception:
+        return OverviewStatsResponse(
+            total_students=0, total_records=0, total_checkins=0,
+            total_journals=0, total_risk_assessments=0,
+            open_alerts=0, acknowledged_alerts=0,
+            high_risk_students=0, medium_risk_students=0,
+            low_risk_students=0, unassessed_students=0,
+            avg_risk_score=0.0, avg_emotion_score=0.0, avg_sentiment_score=0.0,
+            period_days=days,
+        )
 
 
 # ─── Emotion Distribution ───────────────────────────────────────
@@ -147,16 +177,17 @@ async def get_emotion_distribution(
     db: AsyncSession = Depends(get_db),
 ):
     """Distribution of detected emotions (pie / donut chart)."""
-    dist = await analytics_service.get_emotion_distribution(
-        db, days=days, student_id=student_id
-    )
-    items = [EmotionDistributionItem(**d.__dict__) for d in dist]
-    return EmotionDistributionResponse(
-        period_days=days,
-        student_id=student_id,
-        distribution=items,
-        total_analyses=sum(d.count for d in dist),
-    )
+    try:
+        dist = await analytics_service.get_emotion_distribution(
+            db, days=days, student_id=student_id
+        )
+        items = [EmotionDistributionItem(**d.__dict__) for d in dist]
+        return EmotionDistributionResponse(
+            period_days=days, student_id=student_id,
+            distribution=items, total_analyses=sum(d.count for d in dist),
+        )
+    except Exception:
+        return EmotionDistributionResponse(period_days=days, distribution=[], total_analyses=0)
 
 
 # ─── Risk Distribution (Heatmap) ────────────────────────────────
@@ -172,10 +203,13 @@ async def get_risk_distribution(
     db: AsyncSession = Depends(get_db),
 ):
     """Risk-level distribution (heatmap / pie chart data)."""
-    buckets = await analytics_service.get_risk_distribution(db)
-    bucket_resp = [RiskBucketResponse(**b.__dict__) for b in buckets]
-    total = sum(b.count for b in buckets)
-    return RiskDistributionResponse(buckets=bucket_resp, total_assessed=total)
+    try:
+        buckets = await analytics_service.get_risk_distribution(db)
+        bucket_resp = [RiskBucketResponse(**b.__dict__) for b in buckets]
+        total = sum(b.count for b in buckets)
+        return RiskDistributionResponse(buckets=bucket_resp, total_assessed=total)
+    except Exception:
+        return RiskDistributionResponse(buckets=[], total_assessed=0)
 
 
 @router.get(
@@ -189,14 +223,13 @@ async def get_risk_histogram(
     db: AsyncSession = Depends(get_db),
 ):
     """Risk score histogram for bar chart visualization."""
-    buckets = await analytics_service.get_risk_score_histogram(db, bucket_size=bucket_size)
-    bucket_resp = [RiskHistogramBucket(**b) for b in buckets]
-    total = sum(b.count for b in bucket_resp)
-    return RiskHistogramResponse(
-        bucket_size=bucket_size,
-        buckets=bucket_resp,
-        total_assessed=total,
-    )
+    try:
+        buckets = await analytics_service.get_risk_score_histogram(db, bucket_size=bucket_size)
+        bucket_resp = [RiskHistogramBucket(**b) for b in buckets]
+        total = sum(b.count for b in bucket_resp)
+        return RiskHistogramResponse(bucket_size=bucket_size, buckets=bucket_resp, total_assessed=total)
+    except Exception:
+        return RiskHistogramResponse(bucket_size=bucket_size, buckets=[], total_assessed=0)
 
 
 # ─── Time-Series Trends ─────────────────────────────────────────
@@ -214,16 +247,14 @@ async def get_emotion_trend(
     db: AsyncSession = Depends(get_db),
 ):
     """Daily average emotion scores for line chart."""
-    points = await analytics_service.get_emotion_trend_timeseries(
-        db, days=days, student_id=student_id
-    )
-    return TimeSeriesResponse(
-        metric="emotion_score",
-        period_days=days,
-        student_id=student_id,
-        data_points=[TimeSeriesPointResponse(**p.__dict__) for p in points],
-        total_points=len(points),
-    )
+    try:
+        points = await analytics_service.get_emotion_trend_timeseries(db, days=days, student_id=student_id)
+        return TimeSeriesResponse(
+            metric="emotion_score", period_days=days, student_id=student_id,
+            data_points=[TimeSeriesPointResponse(**p.__dict__) for p in points], total_points=len(points),
+        )
+    except Exception:
+        return TimeSeriesResponse(metric="emotion_score", period_days=days, data_points=[], total_points=0)
 
 
 @router.get(
@@ -238,16 +269,14 @@ async def get_sentiment_trend(
     db: AsyncSession = Depends(get_db),
 ):
     """Daily average sentiment scores for line chart."""
-    points = await analytics_service.get_sentiment_trend_timeseries(
-        db, days=days, student_id=student_id
-    )
-    return TimeSeriesResponse(
-        metric="sentiment_score",
-        period_days=days,
-        student_id=student_id,
-        data_points=[TimeSeriesPointResponse(**p.__dict__) for p in points],
-        total_points=len(points),
-    )
+    try:
+        points = await analytics_service.get_sentiment_trend_timeseries(db, days=days, student_id=student_id)
+        return TimeSeriesResponse(
+            metric="sentiment_score", period_days=days, student_id=student_id,
+            data_points=[TimeSeriesPointResponse(**p.__dict__) for p in points], total_points=len(points),
+        )
+    except Exception:
+        return TimeSeriesResponse(metric="sentiment_score", period_days=days, data_points=[], total_points=0)
 
 
 @router.get(
@@ -262,16 +291,14 @@ async def get_risk_trend(
     db: AsyncSession = Depends(get_db),
 ):
     """Daily average risk scores for line chart."""
-    points = await analytics_service.get_risk_trend_timeseries(
-        db, days=days, student_id=student_id
-    )
-    return TimeSeriesResponse(
-        metric="risk_score",
-        period_days=days,
-        student_id=student_id,
-        data_points=[TimeSeriesPointResponse(**p.__dict__) for p in points],
-        total_points=len(points),
-    )
+    try:
+        points = await analytics_service.get_risk_trend_timeseries(db, days=days, student_id=student_id)
+        return TimeSeriesResponse(
+            metric="risk_score", period_days=days, student_id=student_id,
+            data_points=[TimeSeriesPointResponse(**p.__dict__) for p in points], total_points=len(points),
+        )
+    except Exception:
+        return TimeSeriesResponse(metric="risk_score", period_days=days, data_points=[], total_points=0)
 
 
 # ─── Activity Breakdown ─────────────────────────────────────────
@@ -288,12 +315,13 @@ async def get_activity_breakdown(
     db: AsyncSession = Depends(get_db),
 ):
     """Daily activity counts by type for stacked bar chart."""
-    daily = await analytics_service.get_activity_breakdown(db, days=days)
-    return ActivityBreakdownResponse(
-        period_days=days,
-        daily=[ActivityDayResponse(**d) for d in daily],
-        total_days=len(daily),
-    )
+    try:
+        daily = await analytics_service.get_activity_breakdown(db, days=days)
+        return ActivityBreakdownResponse(
+            period_days=days, daily=[ActivityDayResponse(**d) for d in daily], total_days=len(daily),
+        )
+    except Exception:
+        return ActivityBreakdownResponse(period_days=days, daily=[], total_days=0)
 
 
 # ─── Alert Summary ──────────────────────────────────────────────
@@ -310,14 +338,15 @@ async def get_alert_summary(
     db: AsyncSession = Depends(get_db),
 ):
     """Alert statistics with counts by status, type, and daily trend."""
-    summary = await analytics_service.get_alert_summary(db, days=days)
-    return AlertSummaryResponse(
-        period_days=days,
-        total_alerts=summary["total_alerts"],
-        by_status=summary["by_status"],
-        by_type=summary["by_type"],
-        daily_trend=[AlertDailyTrend(**d) for d in summary["daily_trend"]],
-    )
+    try:
+        summary = await analytics_service.get_alert_summary(db, days=days)
+        return AlertSummaryResponse(
+            period_days=days, total_alerts=summary["total_alerts"],
+            by_status=summary["by_status"], by_type=summary["by_type"],
+            daily_trend=[AlertDailyTrend(**d) for d in summary["daily_trend"]],
+        )
+    except Exception:
+        return AlertSummaryResponse(period_days=days, total_alerts=0, by_status={}, by_type={}, daily_trend=[])
 
 
 # ─── Student Summaries (Dashboard Table) ────────────────────────
@@ -338,19 +367,15 @@ async def get_student_summaries(
     db: AsyncSession = Depends(get_db),
 ):
     """Paginated student summaries with risk, emotion, and alert data."""
-    students, total = await analytics_service.get_student_summaries(
-        db,
-        days=days,
-        risk_level_filter=risk_level,
-        school_filter=school,
-        skip=skip,
-        limit=limit,
-    )
-    return StudentSummaryListResponse(
-        students=[StudentSummaryResponse(**s.__dict__) for s in students],
-        total=total,
-        period_days=days,
-    )
+    try:
+        students, total = await analytics_service.get_student_summaries(
+            db, days=days, risk_level_filter=risk_level, school_filter=school, skip=skip, limit=limit,
+        )
+        return StudentSummaryListResponse(
+            students=[StudentSummaryResponse(**s.__dict__) for s in students], total=total, period_days=days,
+        )
+    except Exception:
+        return StudentSummaryListResponse(students=[], total=0, period_days=days)
 
 
 # ─── School Stats ───────────────────────────────────────────────
@@ -367,8 +392,8 @@ async def get_school_stats(
     db: AsyncSession = Depends(get_db),
 ):
     """School-level aggregated stats for cross-school comparison."""
-    schools = await analytics_service.get_school_stats(db, days=days)
-    return SchoolStatsResponse(
-        period_days=days,
-        schools=[SchoolStatsItem(**s) for s in schools],
-    )
+    try:
+        schools = await analytics_service.get_school_stats(db, days=days)
+        return SchoolStatsResponse(period_days=days, schools=[SchoolStatsItem(**s) for s in schools])
+    except Exception:
+        return SchoolStatsResponse(period_days=days, schools=[])

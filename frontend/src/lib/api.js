@@ -144,6 +144,12 @@ export const api = {
       body: JSON.stringify(data),
     }),
 
+  evaluateLiveText: (text) =>
+    request('/models/evaluate', {
+      method: 'POST',
+      body: JSON.stringify({ text }),
+    }),
+
   promoteModel: (modelName, version) =>
     request('/models/promote', {
       method: 'POST',

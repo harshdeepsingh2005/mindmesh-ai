@@ -1,5 +1,8 @@
 """MindMesh AI Backend Entry Point."""
 
+import os
+import shutil
+import glob
 from contextlib import asynccontextmanager
 from datetime import datetime
 
@@ -13,12 +16,40 @@ from .database.schemas import HealthCheckResponse
 from .logging_config import logger
 from .routes import student, counselor, analytics, auth, users, analysis, alerts, models
 
+# ─── Serverless bootstrap: copy pre-trained models to writable /tmp ───
+if os.getenv("VERCEL"):
+    _tmp_models = "/tmp/saved_models"
+    os.makedirs(_tmp_models, exist_ok=True)
+    _repo_models = os.path.join(os.path.dirname(os.path.dirname(__file__)), "saved_models")
+    if os.path.isdir(_repo_models):
+        for _src in glob.glob(os.path.join(_repo_models, "*.joblib")):
+            _dst = os.path.join(_tmp_models, os.path.basename(_src))
+            if not os.path.exists(_dst):
+                shutil.copy2(_src, _dst)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application startup and shutdown lifecycle."""
     logger.info(f"Starting {settings.APP_NAME} v{settings.APP_VERSION}")
-    # Removed await init_db() to save 3s of Vercel boot time over the 10s Lambda Limit
+
+    # On Vercel: copy pre-trained models from read-only repo to writable /tmp
+    if os.getenv("VERCEL"):
+        tmp_models = "/tmp/saved_models"
+        os.makedirs(tmp_models, exist_ok=True)
+        # The repo's saved_models/ lives at /var/task/saved_models/
+        repo_models = os.path.join(os.path.dirname(os.path.dirname(__file__)), "saved_models")
+        if os.path.isdir(repo_models):
+            for src in glob.glob(os.path.join(repo_models, "*.joblib")):
+                dst = os.path.join(tmp_models, os.path.basename(src))
+                if not os.path.exists(dst):
+                    shutil.copy2(src, dst)
+                    logger.info(f"Copied pre-trained model: {os.path.basename(src)}")
+
+    try:
+        await init_db()
+    except Exception as e:
+        logger.warning(f"Database init skipped: {e}")
     logger.info("Application started successfully.")
     yield
     await close_db()

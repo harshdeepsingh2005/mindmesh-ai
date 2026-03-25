@@ -27,10 +27,16 @@ from ..logging_config import logger
 
 # ── NLTK Data Download (one-time) ────────────────────────────────
 
+import os
+nltk_data_dir = "/tmp/nltk_data"
+os.makedirs(nltk_data_dir, exist_ok=True)
+if nltk_data_dir not in nltk.data.path:
+    nltk.data.path.append(nltk_data_dir)
+
 try:
-    nltk.data.find("sentiment/vader_lexicon.zip")
+    nltk.data.find("sentiment/vader_lexicon.zip", paths=[nltk_data_dir])
 except LookupError:
-    nltk.download("vader_lexicon", quiet=True)
+    nltk.download("vader_lexicon", download_dir=nltk_data_dir, quiet=True)
 
 
 # ── Constants ────────────────────────────────────────────────────
