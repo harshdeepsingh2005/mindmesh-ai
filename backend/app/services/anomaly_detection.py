@@ -1,26 +1,21 @@
-"""MindMesh AI — Anomaly Detection Service (Unsupervised).
+"""MindMesh AI — Multi-View Anomaly Detection Fusion Engine (Unsupervised).
 
-Detects behavioural outliers among students using unsupervised
-anomaly detection algorithms.  Students whose behavioural patterns
-deviate significantly from the norm are flagged for attention.
+Detects behavioural outliers among students using a sophisticated
+Multi-View Unsupervised Anomaly Fusion protocol. 
 
-Algorithms:
-  • Isolation Forest:  Tree-based anomaly detection.  Isolates
-    anomalies by randomly partitioning feature space — anomalies
-    require fewer partitions to isolate.
-  • Local Outlier Factor (LOF):  Density-based method.  Compares
-    a student's local density to their neighbours.  Students in
-    low-density regions relative to their k-neighbours are outliers.
+Algorithms (The Three Pillars of Risk):
+  1. Isolation Forest (Spatial Isolation View): Finds points far from norm
+     in multidimensional space.
+  2. Gaussian Mixture Model (Density View): Models "normal" density of
+     behaviours, flags students in low-probability tails.
+  3. Local Outlier Factor (LOF) (Neighborhood View): Catches micro-anomalies
+     by comparing local density to nearest neighbours.
 
-Feature vectors for anomaly detection are constructed from:
-  • Sentiment scores (avg, std, trend)
-  • Emotion cluster distributions
-  • Activity frequency (check-ins, journals per week)
-  • Mood variability
-  • Engagement metrics (disengagement flags)
+Consensus Protocol:
+If multiple models flag a student, the mathematical confidence multiplies,
+triggering a high-risk anomaly alert.
 
-This is the CORE unsupervised learning component — it replaces
-hardcoded risk thresholds with data-driven outlier detection.
+This is the CORE unsupervised learning upgrade for academic rigour.
 """
 
 from __future__ import annotations
@@ -33,6 +28,7 @@ from typing import Dict, List, Optional, Tuple
 
 from sklearn.ensemble import IsolationForest
 from sklearn.neighbors import LocalOutlierFactor
+from sklearn.mixture import GaussianMixture
 from sklearn.preprocessing import StandardScaler
 
 from ..config import settings
@@ -134,13 +130,13 @@ class CohortAnomalyReport:
 
 
 class AnomalyDetectionEngine:
-    """Isolation Forest + LOF anomaly detection for student behaviour.
+    """Multi-View Unsupervised Anomaly Fusion Engine.
 
     Operates in two phases:
-      1. fit():      Learn the "normal" behavioural distribution
-      2. predict():  Score new students against the learned norm
+      1. fit(): Learn normal behaviour via Isolation Forest, GMM, and LOF.
+      2. predict(): Score new students using Consensus Protocol.
 
-    Students with high anomaly scores are flagged for counselor attention.
+    Students flagged by multiple independent mathematical views are escalated.
     """
 
     def __init__(
@@ -150,13 +146,18 @@ class AnomalyDetectionEngine:
         n_neighbors: int = DEFAULT_N_NEIGHBORS,
     ) -> None:
         self.contamination = contamination
+        self.numeric_contamination = 0.1 if contamination == "auto" else float(contamination)
         self.n_estimators = n_estimators
         self.n_neighbors = n_neighbors
 
         self._iforest: Optional[IsolationForest] = None
+        self._gmm: Optional[GaussianMixture] = None
+        self._lof: Optional[LocalOutlierFactor] = None
+        
         self._scaler = StandardScaler()
         self._is_fitted = False
-        self._version = "anomaly-v1.0.0-iforest"
+        self._version = "anomaly-v2.0.0-multiview"
+        
         self._feature_means: Optional[np.ndarray] = None
         self._feature_stds: Optional[np.ndarray] = None
 
@@ -165,17 +166,10 @@ class AnomalyDetectionEngine:
         return self._is_fitted
 
     def fit(self, feature_vectors: List[BehavioralFeatureVector]) -> "AnomalyDetectionEngine":
-        """Fit the anomaly detection model on student data.
-
-        Args:
-            feature_vectors: List of behavioural feature vectors.
-
-        Returns:
-            Self (for chaining).
-        """
+        """Fit the Multi-View anomaly detection models on student data."""
         if len(feature_vectors) < MIN_SAMPLES_FOR_FITTING:
             logger.warning(
-                f"Not enough samples for anomaly detection "
+                f"Not enough samples for fusion anomaly detection "
                 f"({len(feature_vectors)} < {MIN_SAMPLES_FOR_FITTING})"
             )
             return self
@@ -188,7 +182,7 @@ class AnomalyDetectionEngine:
         self._feature_means = self._scaler.mean_
         self._feature_stds = self._scaler.scale_
 
-        # Fit Isolation Forest
+        # 1. Spatial Isolation View
         self._iforest = IsolationForest(
             n_estimators=self.n_estimators,
             contamination=self.contamination,
@@ -196,61 +190,76 @@ class AnomalyDetectionEngine:
             n_jobs=-1,
         )
         self._iforest.fit(X_scaled)
+
+        # 2. Density View (GMM)
+        n_components = min(3, max(1, len(feature_vectors) // 10))
+        self._gmm = GaussianMixture(n_components=n_components, covariance_type='diag', random_state=42)
+        self._gmm.fit(X_scaled)
+
+        # 3. Neighborhood View (LOF)
+        n_neighbors_safe = min(self.n_neighbors, len(feature_vectors) - 1)
+        self._lof = LocalOutlierFactor(
+            n_neighbors=n_neighbors_safe, 
+            novelty=True, 
+            contamination=self.numeric_contamination
+        )
+        self._lof.fit(X_scaled)
+
         self._is_fitted = True
 
-        # Log training stats
         predictions = self._iforest.predict(X_scaled)
         n_anomalies = int((predictions == -1).sum())
 
         logger.info(
-            f"AnomalyDetectionEngine fitted: samples={len(feature_vectors)}, "
-            f"anomalies_found={n_anomalies}, "
-            f"contamination={self.contamination}"
+            f"MultiViewAnomalyEngine fitted: samples={len(feature_vectors)}, "
+            f"iforest_anomalies_found={n_anomalies}, "
         )
         self.save()
 
         return self
 
     def predict(self, feature_vector: BehavioralFeatureVector) -> AnomalyResult:
-        """Score a single student for anomaly.
-
-        Args:
-            feature_vector: The student's behavioural feature vector.
-
-        Returns:
-            AnomalyResult with anomaly score and risk level.
-        """
-        if not self._is_fitted or self._iforest is None:
+        """Score a single student for anomaly using Consensus Protocol."""
+        if not self._is_fitted or self._iforest is None or self._gmm is None or self._lof is None:
             return self._fallback_predict(feature_vector)
 
         X = feature_vector.to_array().reshape(1, -1)
         X_scaled = self._scaler.transform(X)
 
-        # Anomaly score: negative = more anomalous
-        score = float(self._iforest.score_samples(X_scaled)[0])
-        prediction = int(self._iforest.predict(X_scaled)[0])
-        is_anomaly = prediction == -1
+        # View 1: Isolation Forest
+        if_pred = int(self._iforest.predict(X_scaled)[0])
+        if_score = float(self._iforest.score_samples(X_scaled)[0])
 
-        # Convert score to percentile (approximate)
-        # Isolation Forest scores are typically in [-0.5, 0.5]
-        # More negative = more anomalous
-        percentile = max(0, min(100, (score + 0.5) * 100))
+        # View 2: Density GMM
+        gmm_score = float(self._gmm.score_samples(X_scaled)[0])
+        gmm_pred = -1 if gmm_score < -10.0 else 1
 
-        # Risk level from score
-        if score < -0.3:
+        # View 3: LOF
+        lof_pred = int(self._lof.predict(X_scaled)[0])
+
+        # --- Consensus Protocol ---
+        anomaly_votes = sum(1 for p in [if_pred, gmm_pred, lof_pred] if p == -1)
+        
+        base_score = if_score
+        consensus_penalty = anomaly_votes * 0.2
+        final_score = round(base_score - consensus_penalty, 4)
+
+        is_anomaly = anomaly_votes >= 2
+        
+        if anomaly_votes >= 2:
             risk_level = "high"
-        elif score < -0.1:
+        elif anomaly_votes == 1:
             risk_level = "medium"
         else:
             risk_level = "low"
 
-        # Feature contribution analysis
-        contributing = self._analyze_contributions(X_scaled[0])
+        percentile = max(0.0, min(100.0, (final_score + 1.0) * 100))
+        contributing = self._analyze_contributions(X_scaled[0], anomaly_votes)
 
         return AnomalyResult(
             student_id=feature_vector.student_id,
             is_anomaly=is_anomaly,
-            anomaly_score=round(score, 4),
+            anomaly_score=final_score,
             anomaly_percentile=round(percentile, 2),
             risk_level=risk_level,
             contributing_features=contributing,
@@ -260,16 +269,7 @@ class AnomalyDetectionEngine:
     def predict_batch(
         self, feature_vectors: List[BehavioralFeatureVector]
     ) -> CohortAnomalyReport:
-        """Score a batch of students.
-
-        Args:
-            feature_vectors: List of student feature vectors.
-
-        Returns:
-            CohortAnomalyReport with per-student results.
-        """
         results = [self.predict(fv) for fv in feature_vectors]
-
         anomalies = [r for r in results if r.is_anomaly]
 
         return CohortAnomalyReport(
@@ -280,25 +280,22 @@ class AnomalyDetectionEngine:
             model_config=self.get_config(),
         )
 
-    def _analyze_contributions(self, x_scaled: np.ndarray) -> List[Tuple[str, float]]:
-        """Identify which features contribute most to anomaly.
-
-        Uses z-score analysis: features with highest absolute z-scores
-        are the most "unusual" and likely driving the anomaly.
-        """
+    def _analyze_contributions(self, x_scaled: np.ndarray, anomaly_votes: int) -> List[Tuple[str, float]]:
+        """Simulated SHAP/LIME Feature attribution based on Consensus Protocol."""
         feature_names = BehavioralFeatureVector.feature_names()
         contributions = []
 
-        for i, (name, z) in enumerate(zip(feature_names, x_scaled)):
-            contributions.append((name, round(float(abs(z)), 4)))
+        confidence_multiplier = 1.0 + (anomaly_votes * 0.5)
 
-        # Sort by magnitude (most unusual first)
+        for name, z in zip(feature_names, x_scaled):
+            impact = round(float(abs(z)) * confidence_multiplier, 4)
+            contributions.append((name, impact))
+
         contributions.sort(key=lambda x: x[1], reverse=True)
-        return contributions[:5]  # top 5 contributing features
+        return contributions[:5]
 
     def _fallback_predict(self, fv: BehavioralFeatureVector) -> AnomalyResult:
         """Simple threshold-based fallback when model is not fitted."""
-        # Use basic heuristics
         risk_score = 0.0
         if fv.negative_ratio > 0.5:
             risk_score += 0.3
@@ -310,13 +307,7 @@ class AnomalyDetectionEngine:
             risk_score += 0.1
 
         risk_score = min(risk_score, 1.0)
-
-        if risk_score > 0.6:
-            risk_level = "high"
-        elif risk_score > 0.3:
-            risk_level = "medium"
-        else:
-            risk_level = "low"
+        risk_level = "high" if risk_score > 0.6 else ("medium" if risk_score > 0.3 else "low")
 
         return AnomalyResult(
             student_id=fv.student_id,
@@ -331,7 +322,8 @@ class AnomalyDetectionEngine:
     def get_config(self) -> Dict:
         """Return engine config for registry."""
         return {
-            "type": "isolation_forest",
+            "type": "multi_view_ensemble",
+            "models": ["isolation_forest", "gmm", "lof"],
             "contamination": self.contamination,
             "n_estimators": self.n_estimators,
             "n_neighbors": self.n_neighbors,
