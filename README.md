@@ -31,6 +31,8 @@ MindMesh AI continuously analyzes student behavioral signals — journal entries
 
 ### How It Works
 
+**Overview:** The system captures unstructured student inputs (daily emojis, journal texts) and transforms them into high-dimensional numerical vectors. It groups similar emotional states and extracts latent human stressors using clustering techniques (K-Means, NMF). Then, it feeds these quantified behavioral metrics into a **Three-Pillar Anomaly Fusion Engine** (Isolation Forest, GMM, LOF). If a student mathematically diverges from the school's normal behavioral baseline, the engines vote. Only when multiple mathematically distinct models reach a strict anomaly consensus does the system flag the student, generating an Explainable AI (XAI) alert for the counselor with exact geometric feature attributions.
+
 ```
 Student Input → TF-IDF Embeddings → K-Means Emotion Clustering
                                   → NMF Topic Discovery
