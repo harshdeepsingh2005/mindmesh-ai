@@ -198,10 +198,11 @@ class AnomalyDetectionEngine:
 
         # 3. Neighborhood View (LOF)
         n_neighbors_safe = min(self.n_neighbors, len(feature_vectors) - 1)
+        safe_contamination = getattr(self, 'numeric_contamination', 0.1)
         self._lof = LocalOutlierFactor(
             n_neighbors=n_neighbors_safe, 
             novelty=True, 
-            contamination=self.numeric_contamination
+            contamination=safe_contamination
         )
         self._lof.fit(X_scaled)
 
