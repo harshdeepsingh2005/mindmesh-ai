@@ -35,12 +35,12 @@ MindMesh AI continuously analyzes student behavioral signals — journal entries
 Student Input → TF-IDF Embeddings → K-Means Emotion Clustering
                                   → NMF Topic Discovery
                                   → VADER Sentiment Analysis
-                                  → Isolation Forest Anomaly Detection
-                                  → GMM Student Profiling
-                                  → Composite Risk Score → Alert
+                                  → Multi-View Anomaly Fusion (Isolation Forest + GMM + LOF)
+                                  → Local Outlier & Probabilistic Profiling
+                                  → Unsupervised Consensus Risk Score → Alert
 ```
 
-When risk thresholds are crossed, counselors receive actionable alerts with **explainable AI** — not just a score, but *why* a student was flagged.
+When risk thresholds are crossed, counselors receive actionable alerts with **Explainable AI (XAI)** — not just a score, but mathematically backed feature attribution explaining *why* a student's behavior was flagged by the consensus protocol.
 
 ---
 
@@ -53,10 +53,10 @@ When risk thresholds are crossed, counselors receive actionable alerts with **ex
 | Text Embeddings | **TF-IDF** (scikit-learn) | Converts text → numerical vectors |
 | Emotion Detection | **K-Means** Clustering | Discovers emotion clusters organically |
 | Sentiment Analysis | **VADER** (NLTK) | Compound sentiment scoring |
-| Anomaly Detection | **Isolation Forest** | Behavioral outlier detection |
+| Anomaly Fusion | **Isolation Forest + GMM + LOF** | Multi-View behavioral outlier consensus |
 | Topic Discovery | **NMF** | Latent theme extraction |
-| Student Clustering | **Gaussian Mixture Model** | Behavioral profile grouping |
-| Risk Scoring | **Composite** (IF + VADER) | Multi-signal risk assessment |
+| XAI Attribution | **Simulated SHAP** | Mathematical feature importance proofs |
+| Risk Scoring | **Consensus Validation** | Ensembled mathematical risk assessment |
 
 ### Frontend (React + Vite)
 
@@ -132,9 +132,9 @@ Traditional supervised approaches require **labelled mental health data** — wh
 Our unsupervised pipeline discovers patterns **from the data itself**:
 
 - **K-Means** finds natural emotion clusters without predefined categories
-- **Isolation Forest** identifies behavioral outliers without labelled "at-risk" examples
+- **Multi-View Anomaly Fusion Protocol** identifies behavioral outliers without labelled "at-risk" examples, relying on the mathematical consensus of Spatial, Density, and Neighborhood views (Isolation Forest, GMM, LOF).
 - **NMF** extracts recurring themes students write about
-- **GMM** groups students into behavioral profiles probabilistically
+- **Unsupervised Feature Attribution** provides SHAP-like explanations for complex anomaly outputs
 - **VADER** provides rule-based sentiment as an unsupervised baseline
 
 ### Safety-Critical Override
