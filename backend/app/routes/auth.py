@@ -99,7 +99,25 @@ async def login(
         elif credentials.email == "teacher@mindmesh.ai":
             access_token = create_access_token(data={"sub": "teacher-demo-uuid", "role": "teacher"})
             return TokenResponse(access_token=access_token, token_type="bearer", user_id="teacher-demo-uuid", role="teacher")
-
+        
+        # New 5 Seeded credentials bypass
+        if credentials.email.startswith("admin") and credentials.email.endswith("@mindmesh.ai"):
+            try:
+                num = int(credentials.email.replace("admin", "").replace("@mindmesh.ai", ""))
+                if 1 <= num <= 5:
+                    access_token = create_access_token(data={"sub": f"admin-demo-uuid-{num}", "role": "admin"})
+                    return TokenResponse(access_token=access_token, token_type="bearer", user_id=f"admin-demo-uuid-{num}", role="admin")
+            except ValueError:
+                pass
+                
+        if credentials.email.startswith("student") and credentials.email.endswith("@mindmesh.ai"):
+            try:
+                num = int(credentials.email.replace("student", "").replace("@mindmesh.ai", ""))
+                if 1 <= num <= 5:
+                    access_token = create_access_token(data={"sub": f"student-demo-uuid-{num}", "role": "student"})
+                    return TokenResponse(access_token=access_token, token_type="bearer", user_id=f"student-demo-uuid-{num}", role="student")
+            except ValueError:
+                pass
     try:
         result = await db.execute(select(User).where(User.email == credentials.email))
         user = result.scalar_one_or_none()
