@@ -48,7 +48,10 @@ async def get_current_user(
         raise credentials_exception
 
     # Serverless Mock Users
-    if user_id in ("admin-demo-uuid", "student-demo-uuid", "teacher-demo-uuid"):
+    if (user_id in ("admin-demo-uuid", "student-demo-uuid", "teacher-demo-uuid") or 
+        user_id.startswith("admin-demo-uuid-") or 
+        user_id.startswith("student-demo-uuid-") or
+        user_id.startswith("teacher-demo-uuid-")):
         role = payload.get("role", "student")
         return User(id=user_id, email=f"{role}@mindmesh.ai", name=f"{role.capitalize()} Demo", role=role)
 
