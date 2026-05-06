@@ -12,6 +12,7 @@ behavioral data through the unsupervised ML pipeline.
 """
 
 import uuid
+import time
 from typing import Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -23,6 +24,7 @@ from ..logging_config import logger
 from .emotion_detection import detect_emotion, EmotionResult
 from .sentiment_analysis import analyze_sentiment, SentimentResult
 from .topic_discovery import get_topic_engine
+from .prediction_metrics import compute_prediction_metrics
 
 
 async def analyze_record(
@@ -177,6 +179,8 @@ async def analyze_text_standalone(
     Returns:
         Dict with emotion, sentiment, and topic analysis results.
     """
+    start_time = time.perf_counter()
+
     emotion_result = detect_emotion(text)
     sentiment_result = analyze_sentiment(text)
 
@@ -192,7 +196,7 @@ async def analyze_text_standalone(
             "confidence": topic_result.confidence,
         }
 
-    return {
+    response = {
         "emotion": {
             "predicted_cluster": emotion_result.predicted_cluster,
             "cluster_label": emotion_result.cluster_label,
@@ -213,3 +217,14 @@ async def analyze_text_standalone(
         },
         "topic": topic_info,
     }
+
+    latency_seconds = time.perf_counter() - start_time
+    response["metrics"] = compute_prediction_metrics(
+        text=text,
+        emotion=response["emotion"],
+        sentiment=response["sentiment"],
+        topic=response.get("topic") or {},
+        latency_seconds=latency_seconds,
+    )
+
+    return response

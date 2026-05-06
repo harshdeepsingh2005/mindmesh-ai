@@ -195,6 +195,7 @@ class EmotionAnalyzeResponse(BaseModel):
     emotion: Dict
     sentiment: Dict
     topic: Optional[Dict] = None
+    metrics: Optional[Dict[str, Any]] = None
 
 
 class TrendAnalysisResponse(BaseModel):
